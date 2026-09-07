@@ -30,11 +30,11 @@ export class BallTracker {
     this.lastCandidates = [];
   }
 
-  async initDetector(fileset, modelBuffer) {
+  async initDetector(fileset, modelBuffer, delegate = 'GPU') {
     const { loadVision } = await import('./config.js');
     const { ObjectDetector } = await loadVision();
     this.detector = await ObjectDetector.createFromOptions(fileset, {
-      baseOptions: { modelAssetBuffer: modelBuffer, delegate: 'GPU' },
+      baseOptions: { modelAssetBuffer: modelBuffer, delegate },
       runningMode: 'VIDEO',
       scoreThreshold: 0.18,
       maxResults: 8,

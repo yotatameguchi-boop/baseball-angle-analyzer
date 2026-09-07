@@ -52,7 +52,7 @@ const state = {
   fpsEMA: 0, lastFrameTs: 0,
   cancelAnalyze: false,
   lastBall: null, ballCands: [],
-  rec: null, lastProcessed: 0, detectorLoaded: false, skipped: 0,
+  rec: null, lastProcessed: 0, detectorLoaded: false, skipped: 0, usingCpu: false,
 };
 
 const chart = new TimeChart(el.chart, {
@@ -129,16 +129,43 @@ async function ensureModel() {
 
   showLoading(true, 'モデルを初期化中…', 100);
   if (state.landmarker) { state.landmarker.close(); state.landmarker = null; }
-  state.landmarker = await PoseLandmarker.createFromOptions(state.fileset, {
-    baseOptions: { modelAssetBuffer: buf, delegate: 'GPU' },
+  state.landmarker = await createWithFallback(PoseLandmarker, {
+    modelAssetBuffer: buf,
     runningMode: 'VIDEO', numPoses: 1,
     minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
-  });
+  }, 'PoseLandmarker');
   state.modelKey = key;
   await ensureDetector();
   showLoading(false);
   renderCacheList();
-  setStatus('準備完了', 'on');
+  setStatus(state.usingCpu ? '準備完了（CPU動作）' : '準備完了', 'on');
+}
+
+/**
+ * WebGL が使えない端末では GPU デリゲートの初期化が返ってこないことがある。
+ * 一定時間で見切りをつけて CPU にフォールバックする。
+ */
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`${label} がタイムアウトしました`)), ms); }),
+  ]);
+}
+
+async function createWithFallback(Klass, options, label) {
+  const { modelAssetBuffer, ...rest } = options;
+  try {
+    return await withTimeout(
+      Klass.createFromOptions(state.fileset, { baseOptions: { modelAssetBuffer, delegate: 'GPU' }, ...rest }),
+      15000, `${label}(GPU) の初期化`);
+  } catch (e) {
+    console.warn(`${label}: GPU が使えないため CPU で初期化します`, e);
+    showLoading(true, 'GPUが使えないためCPUで初期化中…（動作が遅くなります）', 100);
+    state.usingCpu = true;
+    return await Klass.createFromOptions(state.fileset,
+      { baseOptions: { modelAssetBuffer, delegate: 'CPU' }, ...rest });
+  }
 }
 
 /** 物体検出モデルは容量が大きいので、明示的にオンにしたときだけ読み込む */
@@ -153,7 +180,7 @@ async function ensureDetector() {
       el.loadingText.textContent = fromCache ? '物体検出モデルを読み込み中…（保存済み）'
         : `${asset.label} をダウンロード中… ${LOAD.fmtBytes(loaded)} / ${LOAD.fmtBytes(total || asset.bytes)}`;
     });
-    await state.ball.initDetector(state.fileset, buf);
+    await state.ball.initDetector(state.fileset, buf, state.usingCpu ? 'CPU' : 'GPU');
     state.detectorLoaded = true;
     renderCacheList();
   } catch (e) {
@@ -233,7 +260,8 @@ async function startCamera() {
     setStatus('カメラ計測中', 'on');
     startLoop();
   } catch (e) {
-    setStatus('カメラを開始できません', 'err');
+    showLoading(false);
+    setStatus(`開始できません: ${e.message}`, 'err');
     console.error(e);
   }
 }
