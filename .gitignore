@@ -1,0 +1,8 @@
+# 大容量のモデル・ランタイム（CDNから取得するためリポジトリには含めない）
+models/
+vendor/
+
+# 検証用の画像
+tests/fixtures/
+
+.DS_Store

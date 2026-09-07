@@ -1,0 +1,223 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>テスト</title>
+<style>body{font:13px ui-monospace,monospace;background:#0d1117;color:#e8ecf1;padding:20px}
+.p{color:#3ddc84}.f{color:#ff6b5e}h2{font-size:14px;margin:18px 0 8px;color:#4fc3f7}
+pre{background:#141a23;padding:10px;border-radius:6px;white-space:pre-wrap}
+img{max-width:340px;border:1px solid #2a3342}</style></head><body>
+<h1 style="font-size:16px">Baseball Motion Lab — 検証</h1>
+<div id="out"></div>
+<h2>実写画像での姿勢推定</h2>
+<div id="imgres"></div>
+<canvas id="cv" style="max-width:340px;border:1px solid #2a3342"></canvas>
+<script type="module">
+import { computeAngles, LM, METRICS } from '../js/metrics.js';
+import { pathAngle, detectImpact } from '../js/ball.js';
+import { angleAt, angleBetween } from '../js/geom.js';
+import * as REF from '../js/reference.js';
+
+const out = document.getElementById('out');
+let pass = 0, fail = 0;
+function section(t){ out.insertAdjacentHTML('beforeend', `<h2>${t}</h2>`); }
+function ok(name, got, want, tol = 0.5) {
+  const good = want === null ? got === null
+    : (got !== null && Math.abs(got - want) <= tol);
+  good ? pass++ : fail++;
+  out.insertAdjacentHTML('beforeend',
+    `<div class="${good ? 'p' : 'f'}">${good ? 'PASS' : 'FAIL'} ${name} — got ${got === null ? 'null' : (+got).toFixed(2)}, want ${want}</div>`);
+}
+
+/* --- 合成ランドマークを組み立てる（x=右, y=下, z=奥。原点=腰の中点） --- */
+function skeleton(o = {}) {
+  const p = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0, visibility: 1 }));
+  const set = (i, x, y, z) => { p[i] = { x, y, z, visibility: 1 }; };
+  // 正面向き: 本人の右肩は画面左(x負)
+  set(LM.L_HIP, 0.1, 0, 0);       set(LM.R_HIP, -0.1, 0, 0);
+  set(LM.L_SHOULDER, 0.2, -0.5, 0); set(LM.R_SHOULDER, -0.2, -0.5, 0);
+  // Tポーズ（腕を真横に伸ばす）
+  set(LM.R_ELBOW, -0.5, -0.5, 0); set(LM.R_WRIST, -0.8, -0.5, 0);
+  set(LM.L_ELBOW, 0.5, -0.5, 0);  set(LM.L_WRIST, 0.8, -0.5, 0);
+  // 脚をまっすぐ下ろす
+  set(LM.L_KNEE, 0.1, 0.4, 0);  set(LM.L_ANKLE, 0.1, 0.8, 0);  set(LM.L_TOE, 0.25, 0.85, 0);
+  set(LM.R_KNEE, -0.1, 0.4, 0); set(LM.R_ANKLE, -0.1, 0.8, 0); set(LM.R_TOE, -0.25, 0.85, 0);
+  set(LM.L_EAR, 0.08, -0.72, 0); set(LM.R_EAR, -0.08, -0.72, 0); set(LM.NOSE, 0, -0.75, -0.08);
+  if (o.mutate) o.mutate(p, set);
+  return p;
+}
+const A = (p) => computeAngles(p, p, '3d').angles;
+
+section('基本姿勢（正面向き・Tポーズ・直立）');
+{
+  const a = A(skeleton());
+  ok('肘は完全伸展 → 180°', a.elbow_R, 180);
+  ok('膝は完全伸展 → 180°', a.knee_L, 180);
+  ok('肩挙上角: 腕が真横 → 90°', a.shoulder_elev_R, 90);
+  ok('肩水平角: 腕が真横 → 0°', a.shoulder_horiz_R, 0);
+  ok('左肩も同様に 0°', a.shoulder_horiz_L, 0);
+  ok('体幹傾斜: 直立 → 0°', a.trunk_tilt, 0);
+  ok('体幹側屈: 直立 → 0°', a.trunk_lateral, 0);
+  ok('肩回旋: カメラ正対 → 0°', a.shoulder_rot, 0);
+  ok('骨盤回旋: カメラ正対 → 0°', a.pelvis_rot, 0);
+  ok('捻転差: 肩と骨盤が揃う → 0°', a.x_factor, 0);
+}
+
+section('腕の向き');
+{
+  // 右腕をカメラ側(前方)へ
+  const a = A(skeleton({ mutate: (p, set) => { set(LM.R_ELBOW, -0.2, -0.5, -0.3); set(LM.R_WRIST, -0.2, -0.5, -0.6); } }));
+  ok('右腕を前方へ → 水平内転 +90°', a.shoulder_horiz_R, 90);
+  const b = A(skeleton({ mutate: (p, set) => { set(LM.R_ELBOW, -0.2, -0.5, 0.3); set(LM.R_WRIST, -0.2, -0.5, 0.6); } }));
+  ok('右腕を後方へ → 水平外転 -90°', b.shoulder_horiz_R, -90);
+  const c = A(skeleton({ mutate: (p, set) => { set(LM.R_ELBOW, -0.2, 0.0, 0); set(LM.R_WRIST, -0.2, 0.3, 0); } }));
+  ok('腕を下ろす → 挙上角 0°', c.shoulder_elev_R, 0);
+  const d = A(skeleton({ mutate: (p, set) => { set(LM.R_ELBOW, -0.2, -0.9, 0); set(LM.R_WRIST, -0.2, -1.2, 0); } }));
+  ok('腕を真上へ → 挙上角 180°', d.shoulder_elev_R, 180);
+  const e = A(skeleton({ mutate: (p, set) => { set(LM.R_ELBOW, -0.5, -0.5, 0); set(LM.R_WRIST, -0.5, -0.2, 0); } }));
+  ok('肘を90°に曲げる → 90°', a.elbow_R === null ? null : e.elbow_R, 90);
+}
+
+section('体幹の回旋（水平面）');
+{
+  // 肩ラインを画面右向き(+90°)へ: 本人の右肩がカメラ側に来る
+  const a = A(skeleton({ mutate: (p, set) => {
+    set(LM.R_SHOULDER, 0, -0.5, -0.2); set(LM.L_SHOULDER, 0, -0.5, 0.2); } }));
+  ok('肩が画面右向き → +90°', a.shoulder_rot, 90);
+  ok('骨盤は正対のまま → 0°', a.pelvis_rot, 0);
+  ok('捻転差 = 肩 − 骨盤 → +90°', a.x_factor, 90);
+
+  const b = A(skeleton({ mutate: (p, set) => {
+    set(LM.R_SHOULDER, 0, -0.5, 0.2); set(LM.L_SHOULDER, 0, -0.5, -0.2); } }));
+  ok('肩が画面左向き → -90°', b.shoulder_rot, -90);
+
+  const c = A(skeleton({ mutate: (p, set) => {
+    set(LM.R_SHOULDER, 0.2, -0.5, 0); set(LM.L_SHOULDER, -0.2, -0.5, 0); } }));
+  ok('背中を向ける → ±180°', Math.abs(c.shoulder_rot), 180);
+}
+
+section('体幹の傾き');
+{
+  const a = A(skeleton({ mutate: (p, set) => {
+    set(LM.L_SHOULDER, 0.4, -0.5, 0); set(LM.R_SHOULDER, 0.0, -0.5, 0); } }));
+  // 肩中点 (0.2,-0.5,0) → 鉛直から atan(0.2/0.5)=21.8°
+  ok('画面右へ傾ける → 側屈 +21.8°', a.trunk_lateral, 21.8);
+  ok('総合傾斜も 21.8°', a.trunk_tilt, 21.8);
+  const b = A(skeleton({ mutate: (p, set) => {
+    set(LM.L_SHOULDER, 0.2, -0.5, -0.2); set(LM.R_SHOULDER, -0.2, -0.5, -0.2); } }));
+  ok('カメラ側へ前傾 → 前後傾 +21.8°', b.trunk_sagittal, 21.8);
+}
+
+section('2Dモード（画面上の角度）');
+{
+  const p = skeleton();
+  const px = p.map((q) => ({ x: (q.x + 1) * 400, y: (q.y + 1) * 400, z: 0, visibility: 1 }));
+  const r = computeAngles(p, px, '2d').angles;
+  ok('2Dでも肘は 180°', r.elbow_R, 180);
+  ok('2Dでも膝は 180°', r.knee_L, 180);
+  ok('2Dモードでも回旋は3Dで算出 → 0°', r.shoulder_rot, 0);
+}
+
+section('ボール軌道の角度');
+{
+  ok('右上に進む軌道 → +45°', pathAngle([
+    { t: 0, x: 0, y: 100 }, { t: 50, x: 5, y: 95 }, { t: 100, x: 10, y: 90 }]).deg, 45);
+  ok('右下に落ちる軌道 → -45°', pathAngle([
+    { t: 0, x: 0, y: 0 }, { t: 50, x: 5, y: 5 }, { t: 100, x: 10, y: 10 }]).deg, -45);
+  ok('左下に落ちる軌道も -45°（進行方向基準）', pathAngle([
+    { t: 0, x: 100, y: 0 }, { t: 50, x: 95, y: 5 }, { t: 100, x: 90, y: 10 }]).deg, -45);
+  ok('水平な軌道 → 0°', pathAngle([
+    { t: 0, x: 0, y: 50 }, { t: 50, x: 10, y: 50 }, { t: 100, x: 20, y: 50 }]).deg, 0);
+  ok('点が少なすぎる場合は null', pathAngle([{ t: 0, x: 0, y: 0 }]), null);
+}
+
+section('インパクト検出（進行方向の反転）');
+{
+  // 左へ落ちてきた球が、途中で右上へ弾き返される
+  const traj = [];
+  for (let i = 0; i < 8; i++) traj.push({ t: i * 10, x: 400 - i * 20, y: 100 + i * 10 });
+  for (let i = 1; i <= 8; i++) traj.push({ t: 70 + i * 10, x: 260 + i * 25, y: 170 - i * 12 });
+  const imp = detectImpact(traj, () => ({ x: 260, y: 170 }), { frameW: 1280 });
+  ok('インパクトを検出できる', imp ? 1 : 0, 1);
+  if (imp) {
+    const an = (await import('../js/ball.js')).analyzeImpact(traj, imp);
+    out.insertAdjacentHTML('beforeend',
+      `<div>検出時刻 ${imp.t}ms / 方向転換 ${imp.turnDeg}° / 入射角 ${an.incoming?.deg.toFixed(1)}° / 打ち出し角 ${an.outgoing?.deg.toFixed(1)}°</div>`);
+    ok('入射角は負（落ちてくる）', an.incoming.deg < 0 ? 1 : 0, 1);
+    ok('打ち出し角は正（上がる）', an.outgoing.deg > 0 ? 1 : 0, 1);
+  }
+}
+
+section('基準値モデル');
+{
+  const i1 = REF.idealAttackAngle({ levelKey: 'pro', heightCm: 183, massKg: 90, pitchType: 'fastball' });
+  const i2 = REF.idealAttackAngle({ levelKey: 'elementary', heightCm: 145, massKg: 38, pitchType: 'fastball' });
+  out.insertAdjacentHTML('beforeend', `<pre>プロ(183cm/90kg): バットスピード ${i1.batSpeed.mph}mph → 目標 ${i1.distance.target}°
+小学生(145cm/38kg): バットスピード ${i2.batSpeed.mph}mph → 目標 ${i2.distance.target}°</pre>`);
+  ok('バットスピードが速いほど目標角は小さい', i1.distance.target < i2.distance.target ? 1 : 0, 1);
+  ok('目標角は文献の帯(2〜21°)に収まる', (i1.distance.target >= 2 && i2.distance.target <= 21) ? 1 : 0, 1);
+  const c = REF.compare(160, 162, 4);
+  ok('比較: 0.5SD以内なら「基準内」', c.verdict.key === 'in' ? 1 : 0, 1);
+  const c2 = REF.compare(180, 162, 4);
+  ok('比較: 4.5SD離れれば「大きく外れ」', c2.verdict.key === 'out' ? 1 : 0, 1);
+  const an = REF.anthropometry(180, 80);
+  ok('身長180cmの大腿長 ≈ 44.1cm', an.segments.thigh, 44.1, 0.2);
+}
+
+section('メトリクス定義の健全性');
+{
+  const ids = new Set();
+  let dup = 0, noCalc = 0;
+  for (const m of METRICS) { if (ids.has(m.id)) dup++; ids.add(m.id); if (typeof m.calc !== 'function') noCalc++; }
+  ok('IDの重複なし', dup, 0);
+  ok('全メトリクスにcalcがある', noCalc, 0);
+  ok('メトリクス数', METRICS.length, 19, 0);
+}
+
+out.insertAdjacentHTML('beforeend',
+  `<h2>結果: <span class="${fail ? 'f' : 'p'}">${pass} passed / ${fail} failed</span></h2>`);
+window.__testResult = { pass, fail };
+
+/* --- 実写画像で姿勢推定が動くか --- */
+try {
+  const { loadVision, wasmBase, resolveSource } = await import('../js/config.js');
+  const LOAD = await import('../js/loader.js');
+  await resolveSource();
+  const { FilesetResolver, PoseLandmarker } = await loadVision();
+  const fs = await FilesetResolver.forVisionTasks(wasmBase());
+  const buf = await LOAD.loadModelBytes(LOAD.ASSETS.pose_full.url);
+  const lm = await PoseLandmarker.createFromOptions(fs, {
+    baseOptions: { modelAssetBuffer: buf, delegate: 'GPU' },
+    runningMode: 'IMAGE', numPoses: 1,
+  });
+  const img = new Image();
+  await new Promise((res, rej) => {
+    img.onload = res; img.onerror = () => rej(new Error('画像の読み込みに失敗'));
+    img.src = 'fixtures/batter.jpg';
+  });
+  const res = lm.detect(img);
+  const norm = res.landmarks?.[0], world = res.worldLandmarks?.[0];
+  const box = document.getElementById('imgres');
+  if (!norm) { box.innerHTML = '<div class="f">FAIL 姿勢を検出できませんでした</div>'; window.__poseOk = false; }
+  else {
+    const r = computeAngles(world, norm.map((p) => ({ x: p.x * img.width, y: p.y * img.height, z: 0, visibility: p.visibility })), '3d');
+    const rows = METRICS.map((m) => `${m.label.padEnd(18, '　')} ${r.angles[m.id] === null ? '—' : r.angles[m.id].toFixed(1) + '°'}  (信頼度 ${(r.conf[m.id]).toFixed(2)})`).join('\n');
+    box.innerHTML = `<div class="p">PASS 33ランドマークを検出（${norm.length}点）</div><pre>${rows}</pre>`;
+    window.__poseOk = true;
+    window.__poseAngles = r.angles;
+    const cv = document.getElementById('cv');
+    cv.width = img.width; cv.height = img.height;
+    const c = cv.getContext('2d');
+    c.drawImage(img, 0, 0);
+    const { CONNECTIONS } = await import('../js/metrics.js');
+    c.strokeStyle = '#4fc3f7'; c.lineWidth = 6; c.beginPath();
+    for (const [a, b] of CONNECTIONS) {
+      c.moveTo(norm[a].x * img.width, norm[a].y * img.height);
+      c.lineTo(norm[b].x * img.width, norm[b].y * img.height);
+    }
+    c.stroke();
+    c.fillStyle = '#fff';
+    for (const p of norm) { c.beginPath(); c.arc(p.x * img.width, p.y * img.height, 7, 0, 6.29); c.fill(); }
+  }
+} catch (e) {
+  document.getElementById('imgres').innerHTML = `<div class="f">FAIL モデル読込エラー: ${e.message}</div>`;
+  window.__poseOk = false;
+}
+window.__done = true;
+</script></body></html>

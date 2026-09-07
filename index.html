@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Baseball Motion Lab — 野球動作の角度計測</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">⚾</span>
+    <div>
+      <h1>Baseball Motion Lab</h1>
+      <p>カメラ映像から関節角度を数値化し、文献の基準値と比較する</p>
+    </div>
+  </div>
+  <div class="status">
+    <span id="fps" class="pill">— fps</span>
+    <span id="status" class="pill">初期化待ち</span>
+  </div>
+</header>
+
+<div class="app">
+  <!-- ============ 左: 設定 ============ -->
+  <aside class="panel left">
+    <section id="netSection">
+      <h2>通信・オフライン</h2>
+      <div class="netinfo" id="netInfo">回線を判定中…</div>
+      <div class="dlbar" id="dlBar" hidden><div></div></div>
+      <p class="hint" id="dlText" hidden></p>
+      <button id="btnPrefetch" class="btn wide primary">オフライン用に一括ダウンロード</button>
+      <div id="cacheList" class="cachelist"></div>
+      <button id="btnClearCache" class="btn wide">保存データを削除</button>
+      <p class="hint">初回だけダウンロードすれば、以降は通信なしで起動します。Wi‑Fi のうちに取得しておくと 4G でも待ち時間ゼロで使えます。</p>
+    </section>
+
+    <section>
+      <h2>入力</h2>
+      <div class="row">
+        <button id="btnCamera" class="btn primary">カメラ開始</button>
+        <button id="btnStopCamera" class="btn" disabled>停止</button>
+      </div>
+      <label class="file">
+        動画ファイルを解析
+        <input type="file" id="fileInput" accept="video/*">
+      </label>
+      <div class="row" id="fileControls" hidden>
+        <button id="btnAnalyzeFile" class="btn primary">全フレーム解析</button>
+        <button id="btnCancelAnalyze" class="btn" hidden>中止</button>
+      </div>
+      <div class="progress" id="analyzeProgress" hidden><div></div></div>
+      <p class="hint">動画は端末内だけで処理され、どこにも送信されません。</p>
+    </section>
+
+    <section>
+      <h2>計測設定</h2>
+      <label class="field">姿勢モデル
+        <select id="modelSel">
+          <option value="lite">Lite（軽い・高速）</option>
+          <option value="full" selected>Full（標準）</option>
+          <option value="heavy">Heavy（高精度・重い）</option>
+        </select>
+      </label>
+      <label class="field">カメラ解像度
+        <select id="resSel"></select>
+      </label>
+      <label class="field">目標処理レート <span id="fpsTargetVal" class="val">30 fps</span>
+        <input type="range" id="fpsTarget" min="10" max="60" step="2" value="30">
+      </label>
+      <label class="field">関節角度の計測面
+        <select id="dimSel">
+          <option value="3d" selected>3D（奥行き推定を使う）</option>
+          <option value="2d">2D（画面上の見た目の角度）</option>
+        </select>
+      </label>
+      <label class="field">スムージング <span id="smoothVal" class="val">0.35</span>
+        <input type="range" id="smoothing" min="0" max="0.9" step="0.05" value="0.35">
+      </label>
+      <div class="checks">
+        <label><input type="checkbox" id="chkMirror"> 左右反転</label>
+        <label><input type="checkbox" id="chkSkeleton" checked> 骨格を表示</label>
+        <label><input type="checkbox" id="chkArcs" checked> 角度の弧を表示</label>
+      </div>
+    </section>
+
+    <section>
+      <h2>表示プリセット</h2>
+      <select id="presetSel" class="wide"></select>
+    </section>
+
+    <section>
+      <h2>ボール検出</h2>
+      <div class="checks">
+        <label><input type="checkbox" id="chkBall" checked> ボールを追跡する（差分検出・追加DLなし）</label>
+        <label><input type="checkbox" id="chkDetector"> 物体検出モデルも使う（+13.2MB）</label>
+        <label><input type="checkbox" id="chkBallDebug"> 候補ブロブを表示</label>
+      </div>
+      <label class="field">検出感度（差分しきい値） <span id="ballThVal" class="val">26</span>
+        <input type="range" id="ballTh" min="8" max="60" step="2" value="26">
+      </label>
+      <label class="field">ボールの見かけの直径(px) <span id="ballSizeVal" class="val">3–34</span>
+        <input type="range" id="ballSizeMin" min="2" max="20" step="1" value="3">
+        <input type="range" id="ballSizeMax" min="6" max="60" step="2" value="34">
+      </label>
+      <p class="hint warn">高速の投球・打球は 30fps では1フレームあたり1m以上動き、強くブレます。確実に追うには <b>120fps以上のスローモーション撮影</b>を推奨します。</p>
+    </section>
+
+    <section>
+      <h2>選手情報</h2>
+      <div class="grid2">
+        <label class="field">身長 (cm)<input type="number" id="heightCm" value="172" min="100" max="220"></label>
+        <label class="field">体重 (kg)<input type="number" id="massKg" value="66" min="20" max="150"></label>
+      </div>
+      <label class="field">競技レベル
+        <select id="levelSel"></select>
+      </label>
+      <label class="field">バットスピード実測 (mph・任意)
+        <input type="number" id="batSpeed" placeholder="未入力なら推定値を使用" min="20" max="100">
+      </label>
+      <label class="field">想定する球種
+        <select id="pitchTypeSel">
+          <option value="fastball" selected>ストレート（入射角 約-6°）</option>
+          <option value="offspeed">変化球（入射角 約-10°）</option>
+        </select>
+      </label>
+      <label class="field">比較する動作
+        <select id="refSetSel"></select>
+      </label>
+      <button id="btnCalib" class="btn wide">構えの姿勢を基準(0°)にセット</button>
+      <p class="hint" id="calibState">未設定 — 回旋角は「カメラ正対=0°」のままです。</p>
+    </section>
+  </aside>
+
+  <!-- ============ 中央: 映像とグラフ ============ -->
+  <main class="stage-wrap">
+    <div class="stage" id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div class="loading" id="loading" hidden>
+        <div class="spinner"></div>
+        <div id="loadingText">読み込み中…</div>
+        <div class="dlbar wide"><div id="loadingBar"></div></div>
+      </div>
+      <div class="stage-empty" id="stageEmpty">
+        <p>カメラを開始するか、動画ファイルを読み込んでください</p>
+        <p class="small">撮影位置の目安 — スイングのアタックアングル: 打者の<b>真横</b>（投球方向に直角）／
+        体の開き・回旋: 打者・投手の<b>正面または背面</b>／ 肘・膝の角度: <b>横から</b></p>
+      </div>
+    </div>
+
+    <div class="recbar">
+      <button id="btnRecord" class="btn rec">● 記録開始</button>
+      <button id="btnPlay" class="btn" disabled>▶ 再生</button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" disabled>
+      <span id="timeLabel" class="mono">0.00s</span>
+      <button id="btnClear" class="btn" disabled>クリア</button>
+      <button id="btnCsv" class="btn" disabled>CSV出力</button>
+    </div>
+
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div id="legend" class="legend"></div>
+    </div>
+  </main>
+
+  <!-- ============ 右: 数値と比較 ============ -->
+  <aside class="panel right">
+    <nav class="tabs">
+      <button class="tab active" data-tab="live">角度</button>
+      <button class="tab" data-tab="compare">文献比較</button>
+      <button class="tab" data-tab="swing">スイング診断</button>
+      <button class="tab" data-tab="src">出典</button>
+    </nav>
+
+    <div class="tabpane active" id="tab-live">
+      <div id="angleCards" class="cards"></div>
+    </div>
+
+    <div class="tabpane" id="tab-compare">
+      <div class="notice">
+        <b>比較の考え方</b><br>
+        文献の平均±SDに対して、実測値が何SD離れているかを表示します。イベント（インパクト／踏込足接地）を
+        タイムライン上で指定してから比較してください。
+      </div>
+      <div class="row">
+        <button id="btnMarkEvent" class="btn primary" disabled>今の位置をイベントに設定</button>
+      </div>
+      <p class="hint" id="eventState">イベント未設定</p>
+      <div id="compareTable"></div>
+    </div>
+
+    <div class="tabpane" id="tab-swing">
+      <div class="notice warn">
+        <b>身長・体重から理想の関節角度を出す検証済みの式は文献に存在しません。</b><br>
+        ここでは ①文献が示すバットスピードと最適アタックアングルの関係 と
+        ②体格によるバットスピード補正（当アプリの推定）を組み合わせて目標値を出しています。
+        推定部分には <span class="tag l3">体格補正(推定)</span> を付けています。
+      </div>
+      <div id="swingPanel"></div>
+    </div>
+
+    <div class="tabpane" id="tab-src">
+      <div id="sourceList"></div>
+    </div>
+  </aside>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
