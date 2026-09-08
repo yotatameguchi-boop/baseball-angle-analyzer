@@ -1,9 +1,9 @@
 /* アプリ本体をキャッシュして、2回目以降はオフラインでも起動できるようにする */
-const SHELL = 'bml-shell-v2';
+const SHELL = 'bml-shell-v3';
 const SHELL_FILES = [
   './', './index.html', './css/style.css',
   './js/app.js', './js/metrics.js', './js/geom.js', './js/ball.js',
-  './js/chart.js', './js/reference.js', './js/loader.js',
+  './js/chart.js', './js/reference.js', './js/loader.js', './js/events.js', './js/config.js',
   './vendor/tasks-vision/vision_bundle.mjs',
   './vendor/tasks-vision/wasm/vision_wasm_internal.js',
   './vendor/tasks-vision/wasm/vision_wasm_internal.wasm',

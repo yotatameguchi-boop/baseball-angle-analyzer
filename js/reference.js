@@ -75,16 +75,27 @@ const PITCH = (lead, trail) => ([
   { metric: `elbow_${trail}`, event: 'release', mean: 151, sd: 6, level: LEVEL.L1, cite: 'fleisig',
     label: '投球肘 角度（リリース）', raw: '原典: 屈曲 29 ± 6°' },
   { metric: `shoulder_elev_${trail}`, event: 'release', mean: 90, sd: 10, level: LEVEL.L1, cite: 'fleisig',
-    label: '投球肩 挙上角', raw: '原典: 肩外転 約90°' },
+    label: '投球肩 挙上角', raw: '原典: 肩外転 約90°',
+    caution: 'リリース前後は腕が最も速く動くため、フレームレートが低いとモーションブラーで腕の推定が乱れ、実際より小さく出ることがあります。値が大きく外れる場合は、リリースのフレームを目視で確認し「今の位置に設定」で補正してください。' },
   { metric: 'pelvis_rot', event: 'foot_contact', mean: 35, sd: 12, level: LEVEL.L1, cite: 'fleisig',
     label: '骨盤 回旋角（足接地）', raw: '原典: 足接地時に骨盤は約35°ターゲット方向へ回旋', needsCalib: true },
 ]);
 
+/** 最大角速度の基準値（度/秒）。打撃のみ文献値がある。 */
+const SWING_PEAKS = [
+  { key: 'pelvis', label: '骨盤 回旋の最大角速度', mean: 601, sd: 38, level: LEVEL.L1, cite: 'fortenbaugh2011',
+    raw: '原典: Peak Pelvis Rotation Velocity 601 ± 38 °/s（真ん中のコース）' },
+  { key: 'trunk', label: '体幹 回旋の最大角速度', mean: 813, sd: 71, level: LEVEL.L1, cite: 'fortenbaugh2011',
+    raw: '原典: Peak Upper Trunk Rotation Velocity 813 ± 71 °/s' },
+  { key: 'arm', label: '後ろ肘 伸展の最大角速度', mean: 979, sd: 169, level: LEVEL.L1, cite: 'fortenbaugh2011',
+    raw: '原典: Peak Trail Elbow Extension Velocity 979 ± 169 °/s' },
+];
+
 export const REFERENCE_SETS = {
-  bat_R: { label: 'バッティング（右打ち）', kind: 'bat', lead: 'L', trail: 'R', refs: SWING('L', 'R') },
-  bat_L: { label: 'バッティング（左打ち）', kind: 'bat', lead: 'R', trail: 'L', refs: SWING('R', 'L') },
-  pitch_R: { label: 'ピッチング（右投げ）', kind: 'pitch', lead: 'L', trail: 'R', refs: PITCH('L', 'R') },
-  pitch_L: { label: 'ピッチング（左投げ）', kind: 'pitch', lead: 'R', trail: 'L', refs: PITCH('R', 'L') },
+  bat_R: { label: 'バッティング（右打ち）', kind: 'bat', lead: 'L', trail: 'R', refs: SWING('L', 'R'), peaks: SWING_PEAKS },
+  bat_L: { label: 'バッティング（左打ち）', kind: 'bat', lead: 'R', trail: 'L', refs: SWING('R', 'L'), peaks: SWING_PEAKS },
+  pitch_R: { label: 'ピッチング（右投げ）', kind: 'pitch', lead: 'L', trail: 'R', refs: PITCH('L', 'R'), peaks: [] },
+  pitch_L: { label: 'ピッチング（左投げ）', kind: 'pitch', lead: 'R', trail: 'L', refs: PITCH('R', 'L'), peaks: [] },
 };
 
 /* ------------------------------------------------------------------ *

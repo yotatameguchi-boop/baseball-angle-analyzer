@@ -45,9 +45,19 @@
         動画ファイルを解析
         <input type="file" id="fileInput" accept="video/*">
       </label>
-      <div class="row" id="fileControls" hidden>
-        <button id="btnAnalyzeFile" class="btn primary">全フレーム解析</button>
-        <button id="btnCancelAnalyze" class="btn" hidden>中止</button>
+      <div id="fileControls" hidden>
+        <label class="field">解析フレームレート
+          <select id="analyzeFps">
+            <option value="15">15 fps — 速い（長い動画向け）</option>
+            <option value="30" selected>30 fps — 標準</option>
+            <option value="60">60 fps — 細かい</option>
+            <option value="120">120 fps — スロー撮影向け</option>
+          </select>
+        </label>
+        <div class="row">
+          <button id="btnAnalyzeFile" class="btn primary">全フレーム解析</button>
+          <button id="btnCancelAnalyze" class="btn" hidden>中止</button>
+        </div>
       </div>
       <div class="progress" id="analyzeProgress" hidden><div></div></div>
       <p class="hint">動画は端末内だけで処理され、どこにも送信されません。</p>
@@ -151,11 +161,33 @@
 
     <div class="recbar">
       <button id="btnRecord" class="btn rec">● 記録開始</button>
+      <button id="btnStepBack" class="btn icon" disabled title="1コマ戻る（←キー）">◀|</button>
       <button id="btnPlay" class="btn" disabled>▶ 再生</button>
+      <button id="btnStepFwd" class="btn icon" disabled title="1コマ進む（→キー）">|▶</button>
       <input type="range" id="scrub" min="0" max="1000" value="0" disabled>
       <span id="timeLabel" class="mono">0.00s</span>
       <button id="btnClear" class="btn" disabled>クリア</button>
       <button id="btnCsv" class="btn" disabled>CSV出力</button>
+    </div>
+    <div class="recbar sub">
+      <label class="inline">再生速度
+        <select id="speedSel">
+          <option value="0.1">0.1x</option>
+          <option value="0.25">0.25x</option>
+          <option value="0.5" selected>0.5x</option>
+          <option value="1">1x</option>
+          <option value="2">2x</option>
+        </select>
+      </label>
+      <label class="inline"><input type="checkbox" id="chkLoop" checked> 繰り返し再生</label>
+      <span class="abgroup">
+        <button id="btnSetA" class="btn" disabled title="繰り返す区間の始点を今の位置に設定">A点</button>
+        <button id="btnSetB" class="btn" disabled title="繰り返す区間の終点を今の位置に設定">B点</button>
+        <button id="btnClearAB" class="btn" disabled>区間解除</button>
+      </span>
+      <span id="abLabel" class="mono">区間: 全体</span>
+      <span class="spacer"></span>
+      <span class="hintline">スペース=再生/停止　←→=コマ送り</span>
     </div>
 
     <div class="chart-wrap">
@@ -169,7 +201,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="live">角度</button>
       <button class="tab" data-tab="compare">文献比較</button>
-      <button class="tab" data-tab="swing">スイング診断</button>
+      <button class="tab" data-tab="swing">動作診断</button>
       <button class="tab" data-tab="src">出典</button>
     </nav>
 
@@ -183,20 +215,12 @@
         文献の平均±SDに対して、実測値が何SD離れているかを表示します。イベント（インパクト／踏込足接地）を
         タイムライン上で指定してから比較してください。
       </div>
-      <div class="row">
-        <button id="btnMarkEvent" class="btn primary" disabled>今の位置をイベントに設定</button>
-      </div>
-      <p class="hint" id="eventState">イベント未設定</p>
+      <div id="eventList" class="eventlist"></div>
       <div id="compareTable"></div>
     </div>
 
     <div class="tabpane" id="tab-swing">
-      <div class="notice warn">
-        <b>身長・体重から理想の関節角度を出す検証済みの式は文献に存在しません。</b><br>
-        ここでは ①文献が示すバットスピードと最適アタックアングルの関係 と
-        ②体格によるバットスピード補正（当アプリの推定）を組み合わせて目標値を出しています。
-        推定部分には <span class="tag l3">体格補正(推定)</span> を付けています。
-      </div>
+      <div id="diagNotice"></div>
       <div id="swingPanel"></div>
     </div>
 

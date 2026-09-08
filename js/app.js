@@ -4,6 +4,7 @@ import { METRICS, METRIC_BY_ID, CONNECTIONS, LM, PRESETS, computeAngles, AngleSm
 import { BallTracker, detectImpact, analyzeImpact, swingPathAngle, pathAngle } from './ball.js';
 import { TimeChart } from './chart.js';
 import * as REF from './reference.js';
+import * as EV from './events.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -12,6 +13,7 @@ const el = {
   btnCamera: $('btnCamera'), btnStopCamera: $('btnStopCamera'),
   fileInput: $('fileInput'), fileControls: $('fileControls'),
   btnAnalyzeFile: $('btnAnalyzeFile'), btnCancelAnalyze: $('btnCancelAnalyze'),
+  analyzeFps: $('analyzeFps'),
   analyzeProgress: $('analyzeProgress'),
   modelSel: $('modelSel'), dimSel: $('dimSel'), smoothing: $('smoothing'), smoothVal: $('smoothVal'),
   chkMirror: $('chkMirror'), chkSkeleton: $('chkSkeleton'), chkArcs: $('chkArcs'),
@@ -23,9 +25,12 @@ const el = {
   pitchTypeSel: $('pitchTypeSel'), refSetSel: $('refSetSel'),
   btnCalib: $('btnCalib'), calibState: $('calibState'),
   btnRecord: $('btnRecord'), btnPlay: $('btnPlay'), scrub: $('scrub'),
+  btnStepBack: $('btnStepBack'), btnStepFwd: $('btnStepFwd'),
+  speedSel: $('speedSel'), chkLoop: $('chkLoop'),
+  btnSetA: $('btnSetA'), btnSetB: $('btnSetB'), btnClearAB: $('btnClearAB'), abLabel: $('abLabel'),
   timeLabel: $('timeLabel'), btnClear: $('btnClear'), btnCsv: $('btnCsv'),
   chart: $('chart'), legend: $('legend'), angleCards: $('angleCards'),
-  btnMarkEvent: $('btnMarkEvent'), eventState: $('eventState'), compareTable: $('compareTable'),
+  eventList: $('eventList'), compareTable: $('compareTable'), diagNotice: $('diagNotice'),
   swingPanel: $('swingPanel'), sourceList: $('sourceList'),
   netInfo: $('netInfo'), dlBar: $('dlBar'), dlText: $('dlText'),
   btnPrefetch: $('btnPrefetch'), btnClearCache: $('btnClearCache'), cacheList: $('cacheList'),
@@ -44,8 +49,12 @@ const state = {
   stream: null,
   recording: false, frames: [], gripTrack: [],
   recT0: 0, lastAngles: null, lastConf: null, lastLandmarks: null,
-  playing: false, playIdx: null,
-  eventT: null, impact: null,
+  playing: false, playIdx: null, playTimer: null, playGen: 0,
+  loopA: null, loopB: null,
+  mediaRecorder: null, recChunks: [], recordedUrl: null, ballTimeOffset: 0,
+  // frames[].t のうち、動画の 0 秒に対応する時刻（録画開始の遅れを吸収する）
+  videoTimeOffset: 0, captureT0: null,
+  eventT: null, impact: null, events: {}, seq: null, maxSep: null, window: null,
   calib: null,
   visible: new Set(),
   seriesOff: new Set(),
@@ -96,6 +105,8 @@ function initSelects() {
   el.refSetSel.value = 'bat_R';
   applyPreset();
   renderSources();
+  renderEvents();
+  renderCompare();
   renderSwingPanel();
 }
 
@@ -535,6 +546,8 @@ async function analyzeFile() {
   clearRecording();
   state.recording = true;
   state.recT0 = 0;
+  state.ballTimeOffset = 0;
+  state.videoTimeOffset = 0;
   state.ball.reset();
   state.smoother.reset();
 
@@ -543,7 +556,7 @@ async function analyzeFile() {
   el.analyzeProgress.hidden = false;
   const bar = el.analyzeProgress.firstElementChild;
 
-  const fps = 60;
+  const fps = +el.analyzeFps.value || 30;
   const dt = 1 / fps;
   v.pause();
   for (let t = 0; t < duration && !state.cancelAnalyze; t += dt) {
@@ -559,33 +572,117 @@ async function analyzeFile() {
   el.analyzeProgress.hidden = true;
   bar.style.width = '0%';
   finishRecording();
-  setStatus(`解析完了 ${state.frames.length} フレーム`, 'on');
+  setStatus(`解析完了 ${state.frames.length} フレーム（${fps}fps）`, 'on');
 }
 
 /* ================= 記録・再生 ================= */
 
-function toggleRecord() {
+async function toggleRecord() {
   if (!state.recording) {
+    // 前回の記録を見返している最中なら、まずライブ映像に戻す
+    if (state.source === 'recorded' && state.stream) await resumeLive();
     clearRecording();
     state.recording = true;
     state.recT0 = performance.now();
+    state.ballTimeOffset = state.recT0;
     state.smoother.reset();
     state.ball.reset();
+    startVideoCapture();
     el.btnRecord.textContent = '■ 記録停止';
     el.btnRecord.classList.add('active');
   } else {
     state.recording = false;
     el.btnRecord.textContent = '● 記録開始';
     el.btnRecord.classList.remove('active');
-    finishRecording();
+    el.btnRecord.disabled = true;
+    try {
+      const blob = await stopVideoCapture();
+      finishRecording();
+      if (blob) await attachRecordedVideo(blob);
+    } finally {
+      el.btnRecord.disabled = false;
+    }
   }
+}
+
+/* ---------- カメラ記録の映像保存（あとで繰り返し見返すため） ---------- */
+
+function startVideoCapture() {
+  state.recChunks = [];
+  state.mediaRecorder = null;
+  state.captureT0 = null;
+  if (state.source !== 'camera' || !state.stream || typeof MediaRecorder === 'undefined') return;
+  try {
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']
+      .find((t) => MediaRecorder.isTypeSupported(t));
+    const mr = new MediaRecorder(state.stream, mime ? { mimeType: mime } : undefined);
+    mr.ondataavailable = (e) => { if (e.data && e.data.size) state.recChunks.push(e.data); };
+    // MediaRecorder の開始は記録開始より僅かに遅れるので、その差を保持しておく
+    mr.onstart = () => { state.captureT0 = performance.now(); };
+    mr.start();
+    state.mediaRecorder = mr;
+  } catch (e) {
+    console.warn('映像の保存を開始できません（骨格のみ見返せます）', e);
+  }
+}
+
+async function stopVideoCapture() {
+  const mr = state.mediaRecorder;
+  state.mediaRecorder = null;
+  if (!mr || mr.state === 'inactive') return null;
+  await new Promise((res) => { mr.onstop = res; try { mr.stop(); } catch { res(); } });
+  if (!state.recChunks.length) return null;
+  return new Blob(state.recChunks, { type: state.recChunks[0].type || 'video/webm' });
+}
+
+/** 記録した映像を video 要素に読み込み、繰り返し見返せる状態にする */
+async function attachRecordedVideo(blob) {
+  state.running = false;                       // ライブ解析ループを止める
+  if (state.recordedUrl) URL.revokeObjectURL(state.recordedUrl);
+  state.recordedUrl = URL.createObjectURL(blob);
+  const v = el.video;
+  v.pause();
+  v.srcObject = null;
+  v.src = state.recordedUrl;
+  v.loop = false;
+  await new Promise((res) => {
+    const done = () => { v.removeEventListener('loadedmetadata', done); res(); };
+    v.addEventListener('loadedmetadata', done);
+    setTimeout(done, 4000);
+  });
+  await resolveDuration(v);
+  state.videoTimeOffset = state.captureT0 != null ? state.captureT0 - state.recT0 : 0;
+  v.currentTime = 0;
+  state.source = 'recorded';
+  resizeOverlay();
+  showFrame(0, true);
+  setStatus('記録を見返せます（カメラは一時停止中）', 'on');
+}
+
+/** ライブのカメラ映像に戻す */
+async function resumeLive() {
+  const v = el.video;
+  if (!state.stream) return false;
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  v.srcObject = state.stream;
+  try { await v.play(); } catch { /* 自動再生が拒否されても続行 */ }
+  state.source = 'camera';
+  setStatus('カメラ計測中', 'on');
+  startLoop();
+  return true;
 }
 
 function clearRecording() {
   state.frames = []; state.gripTrack = []; state.eventT = null; state.impact = null;
-  el.btnPlay.disabled = true; el.scrub.disabled = true; el.btnCsv.disabled = true;
-  el.btnClear.disabled = true; el.btnMarkEvent.disabled = true;
-  el.eventState.textContent = 'イベント未設定';
+  state.events = {}; state.seq = null; state.maxSep = null;
+  state.loopA = state.loopB = null; state.playIdx = null;
+  stopPlayback();
+  for (const b of [el.btnPlay, el.scrub, el.btnCsv, el.btnClear,
+                   el.btnStepBack, el.btnStepFwd, el.btnSetA, el.btnSetB, el.btnClearAB]) b.disabled = true;
+  renderAbLabel();
+  renderEvents();
   chart.setData({ series: [], range: null, events: [], bands: [] });
   el.compareTable.innerHTML = '';
   renderSwingPanel();
@@ -593,9 +690,8 @@ function clearRecording() {
 
 function finishRecording() {
   if (!state.frames.length) return;
-  el.btnPlay.disabled = false; el.scrub.disabled = false;
-  el.btnCsv.disabled = false; el.btnClear.disabled = false;
-  el.btnMarkEvent.disabled = false;
+  for (const b of [el.btnPlay, el.scrub, el.btnCsv, el.btnClear,
+                   el.btnStepBack, el.btnStepFwd, el.btnSetA, el.btnSetB, el.btnClearAB]) b.disabled = false;
 
   // ボール軌道からインパクトを自動推定
   const gripAt = (t) => {
@@ -608,12 +704,25 @@ function finishRecording() {
   };
   const imp = detectImpact(state.ball.trajectory, gripAt, { frameW: el.video.videoWidth || 1280 });
   state.impact = imp ? analyzeImpact(state.ball.trajectory, imp) : null;
-  if (state.impact) {
-    const relT = state.impact.t - (state.source === 'file' ? 0 : state.recT0);
-    state.eventT = relT;
-    el.eventState.textContent = `インパクトを自動検出: ${(relT / 1000).toFixed(3)}s（方向転換 ${state.impact.turnDeg}°）`;
-  }
+
+  // 打撃／投球のどちらとして解析するかで、検出するイベントを変える
+  const set = REF.REFERENCE_SETS[el.refSetSel.value];
+  state.events = EV.detectEvents(state.frames, {
+    kind: set.kind, lead: set.lead, trail: set.trail,
+    ballTrajectory: state.ball.trajectory,
+    ballTimeOffset: state.ballTimeOffset,
+    impactT: state.impact ? state.impact.t - state.ballTimeOffset : null,
+  });
+  const win = EV.analysisWindow(state.events, set.kind);
+  state.window = win;
+  state.seq = EV.kineticSequence(state.frames, set.trail, win);
+  state.maxSep = EV.maxSeparation(state.frames, win);
+  // グラフの縦線は主要イベントに合わせる
+  const primary = set.kind === 'bat' ? 'contact' : 'release';
+  state.eventT = state.events[primary]?.t ?? state.events.foot_contact?.t ?? null;
+
   updateChart();
+  renderEvents();
   renderCompare();
   renderSwingPanel();
 }
@@ -631,7 +740,11 @@ function updateChart() {
     });
   }
   const events = [];
-  if (state.eventT != null) events.push({ t: state.eventT, label: 'イベント', color: '#ff6b81' });
+  for (const [k, e] of Object.entries(state.events || {})) {
+    if (e) events.push({ t: e.t, label: EV.EVENT_LABEL[k] || k, color: EV.EVENT_COLOR[k] || '#ff6b81' });
+  }
+  if (state.loopA != null) events.push({ t: state.loopA, label: 'A', color: '#3ddc84' });
+  if (state.loopB != null) events.push({ t: state.loopB, label: 'B', color: '#3ddc84' });
   chart.setData({ series, range: [t0, Math.max(t1, t0 + 1)], events, bands: [] });
   renderLegend();
 }
@@ -647,15 +760,43 @@ function adjust(id, v) {
 
 function seekToTime(t) {
   if (!state.frames.length) return;
-  let idx = 0, bd = Infinity;
-  for (let i = 0; i < state.frames.length; i++) {
-    const d = Math.abs(state.frames[i].t - t);
-    if (d < bd) { bd = d; idx = i; }
-  }
-  showFrame(idx);
+  if (state.playing) stopPlayback();
+  showFrame(nearestFrameIndex(t), true);
 }
 
-function showFrame(idx) {
+/** 記録した映像を見返せる状態か（動画ファイル or カメラ録画） */
+function hasVideo() {
+  return (state.source === 'file' || state.source === 'recorded') && !!el.video.src;
+}
+
+function nearestFrameIndex(tMs) {
+  const F = state.frames;
+  if (!F.length) return 0;
+  let lo = 0, hi = F.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (F[mid].t < tMs) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(F[lo - 1].t - tMs) <= Math.abs(F[lo].t - tMs)) return lo - 1;
+  return lo;
+}
+
+/**
+ * @param seekVideo 再生中は映像側が時刻を進めているので、シークし返さない
+ */
+/**
+ * シークの詰まり防止。進行中は最新の目的地だけを保持し、完了後にまとめて1回だけ実行する。
+ * スクラブバーをドラッグすると毎イベントでシークが発生し、video 要素が固まることがある。
+ */
+let pendingSeekSec = null;
+function seekVideoThrottled(timeSec) {
+  const v = el.video;
+  if (v.seeking) { pendingSeekSec = timeSec; return; }
+  pendingSeekSec = null;
+  v.currentTime = timeSec;
+}
+
+function showFrame(idx, seekVideo = true) {
   const f = state.frames[idx];
   if (!f) return;
   state.playIdx = idx;
@@ -663,9 +804,147 @@ function showFrame(idx) {
   el.timeLabel.textContent = `${(f.t / 1000).toFixed(2)}s`;
   chart.setPlayhead(f.t);
   renderCards(f.angles, f.conf);
-  if (state.source === 'file') el.video.currentTime = f.t / 1000;
+  if (seekVideo && hasVideo()) seekVideoThrottled(Math.max(0, (f.t - state.videoTimeOffset) / 1000));
   const norm = f.lm.map((p) => ({ x: p.x, y: p.y, z: 0, visibility: p.v }));
   draw(norm, f.angles, f.conf, { ball: null, candidates: [] });
+}
+
+/* ================= 繰り返し再生 ================= */
+
+/** 再生する時間範囲。A/B区間が設定されていればその区間。 */
+function playbackBounds() {
+  const F = state.frames;
+  if (!F.length) return [0, 0];
+  let a = state.loopA ?? F[0].t;
+  let b = state.loopB ?? F[F.length - 1].t;
+  if (a > b) [a, b] = [b, a];
+  return [a, b];
+}
+
+/**
+ * 再生ループの駆動。requestVideoFrameCallback は映像が停止すると発火しなくなり、
+ * ループごと止まってしまうため、タイマーで独立して回す。
+ */
+function nextFrameCallback(fn) {
+  state.playTimer = setTimeout(fn, 16);
+}
+
+function startPlayback() {
+  if (!state.frames.length) return;
+  const [a, b] = playbackBounds();
+  const cur = state.frames[state.playIdx ?? 0]?.t ?? a;
+  // 終端まで見終わっている、または区間の外にいるときは区間の先頭から再生し直す
+  const startT = (cur >= b - 1 || cur < a) ? a : cur;
+  state.playing = true;
+  // 世代を進めて、以前の再生ループを全て無効にする（同時に走ると互いにシークを奪い合う）
+  const gen = ++state.playGen;
+  el.btnPlay.textContent = '⏸ 一時停止';
+  if (hasVideo()) playWithVideo(gen, startT, a, b);
+  else playSkeletonOnly(gen, startT, a, b);
+}
+
+function stopPlayback() {
+  state.playing = false;
+  state.playGen++;
+  if (state.playTimer) { clearTimeout(state.playTimer); state.playTimer = null; }
+  el.btnPlay.textContent = '▶ 再生';
+  if (hasVideo()) el.video.pause();
+}
+
+/** シーク完了を待ってからコールバックを呼ぶ（完了イベントが来ない場合に備えて保険付き） */
+function seekThen(v, timeSec, cb) {
+  let done = false;
+  const fin = () => {
+    if (done) return;
+    done = true;
+    v.removeEventListener('seeked', fin);
+    cb();
+  };
+  v.addEventListener('seeked', fin);
+  setTimeout(fin, 600);
+  // シーク進行中は currentTime が古い値を返すため、到達済み判定に使ってはいけない。
+  // 必ず目的地を設定し直して 'seeked' を待つ。
+  if (!v.seeking && Math.abs(v.currentTime - timeSec) < 0.005) fin();
+  else v.currentTime = timeSec;
+}
+
+/**
+ * 映像がある場合は動画を実際に再生し、骨格をその時刻に同期させる。
+ * 区間の終端でシークして戻す間は終端判定を止める。止めないと
+ * 「シーク→未完了のまま再び終端と判定→再シーク」で先に進まなくなる。
+ */
+function playWithVideo(gen, startT, a, b) {
+  const v = el.video;
+  const toVideo = (t) => Math.max(0, (t - state.videoTimeOffset) / 1000);
+  const alive = () => state.playing && state.playGen === gen;
+  v.playbackRate = +el.speedSel.value;
+  let seeking = false;
+
+  const tick = () => {
+    if (!alive() || seeking) return;
+    const tMs = v.currentTime * 1000 + state.videoTimeOffset;
+    if (tMs >= b - 8 || v.ended) {
+      if (el.chkLoop.checked) {
+        seeking = true;
+        seekThen(v, toVideo(a), () => {
+          seeking = false;
+          if (!alive()) return;
+          if (v.paused) v.play().catch(() => {});
+          nextFrameCallback(tick);
+        });
+        return;
+      }
+      stopPlayback();
+      showFrame(nearestFrameIndex(b), true);
+      return;
+    }
+    showFrame(nearestFrameIndex(tMs), false);
+    nextFrameCallback(tick);
+  };
+
+  seeking = true;
+  pendingSeekSec = null;
+  seekThen(v, toVideo(startT), () => {
+    seeking = false;
+    if (!alive()) return;
+    v.play().catch(() => {});
+    nextFrameCallback(tick);
+  });
+}
+
+/** 映像が無い（カメラ録画に失敗した等）場合は骨格だけをタイマーで再生する */
+function playSkeletonOnly(gen, startT, a, b) {
+  const alive = () => state.playing && state.playGen === gen;
+  let i = nearestFrameIndex(startT);
+  const step = () => {
+    if (!alive()) return;
+    if (i >= state.frames.length || state.frames[i].t > b) {
+      if (el.chkLoop.checked) i = nearestFrameIndex(a);
+      else { stopPlayback(); return; }
+    }
+    showFrame(i, false);
+    const next = state.frames[i + 1];
+    const dt = next ? next.t - state.frames[i].t : 33;
+    i++;
+    state.playTimer = setTimeout(step, Math.max(8, dt / (+el.speedSel.value || 1)));
+  };
+  step();
+}
+
+function stepFrame(delta) {
+  if (!state.frames.length) return;
+  stopPlayback();
+  const idx = Math.min(state.frames.length - 1, Math.max(0, (state.playIdx ?? 0) + delta));
+  showFrame(idx, true);
+}
+
+function renderAbLabel() {
+  const set = (btn, on) => btn.classList.toggle('set', on);
+  set(el.btnSetA, state.loopA != null);
+  set(el.btnSetB, state.loopB != null);
+  if (state.loopA == null && state.loopB == null) { el.abLabel.textContent = '区間: 全体'; return; }
+  const [a, b] = playbackBounds();
+  el.abLabel.textContent = `区間: ${(a / 1000).toFixed(2)}s → ${(b / 1000).toFixed(2)}s（${((b - a) / 1000).toFixed(2)}s）`;
 }
 
 /* ================= 右パネル描画 ================= */
@@ -719,32 +998,65 @@ function frameAt(t) {
   return best;
 }
 
-function renderCompare() {
+/** 検出したイベントの一覧。自動検出が外れた場合はここで手動修正する。 */
+function renderEvents() {
   const set = REF.REFERENCE_SETS[el.refSetSel.value];
-  const f = frameAt(state.eventT);
   if (!set) return;
-  if (!f) {
-    el.compareTable.innerHTML = '<p class="hint">記録してからイベント（インパクト／踏込足接地）を設定すると比較できます。</p>';
+  const wanted = set.kind === 'bat' ? ['contact', 'foot_contact'] : ['foot_contact', 'release'];
+  if (!state.frames.length) {
+    el.eventList.innerHTML = '<p class="hint">記録または動画解析を行うと、イベントが自動検出されます。</p>';
     return;
   }
+  el.eventList.innerHTML = wanted.map((k) => {
+    const e = state.events[k];
+    const color = EV.EVENT_COLOR[k];
+    return `<div class="evt ${e ? '' : 'missing'}">
+      <span class="dot" style="background:${color}"></span>
+      <span class="body">
+        <span class="nm">${EV.EVENT_LABEL[k]}</span>
+        <span class="mt">${e ? `${(e.t / 1000).toFixed(3)}s ／ ${e.method}` : '自動検出できませんでした'}</span>
+      </span>
+      <button class="btn" data-evt="${k}">今の位置に設定</button>
+    </div>`;
+  }).join('');
+  el.eventList.querySelectorAll('button[data-evt]').forEach((b) => {
+    b.onclick = () => setEventHere(b.dataset.evt);
+  });
+}
+
+function renderCompare() {
+  const set = REF.REFERENCE_SETS[el.refSetSel.value];
+  if (!set) return;
+  if (!state.frames.length) {
+    el.compareTable.innerHTML = '<p class="hint">記録または動画解析を行うと、文献値と比較できます。</p>';
+    return;
+  }
+
   const rows = set.refs.map((r) => {
     const m = METRIC_BY_ID[r.metric];
-    let actual = adjust(r.metric, f.angles[r.metric]);
+    const ev = state.events[r.event];
+    const evLabel = EV.EVENT_LABEL[r.event] || r.event;
+    if (!ev) {
+      return `<tr><td><b>${r.label}</b> <span class="tag l1">${r.level}</span>
+        <div class="rawnote">${r.raw}</div></td>
+        <td colspan="2"><span class="na">${evLabel}が未検出</span></td></tr>`;
+    }
+    const f = state.frames[ev.index] || frameAt(ev.t);
+    let actual = f ? adjust(r.metric, f.angles[r.metric]) : null;
     let note = '';
     if (r.needsCalib) {
       if (!state.calib) note = '<div class="caution">「構えの姿勢を基準にセット」が未実行のため、この値は文献と同じ基準になっていません。</div>';
       actual = actual == null ? null : Math.abs(actual);
       note += '<div class="rawnote">回旋の向きは自動的に正方向へ揃えています。</div>';
     }
-    const na = el.dimSel.value === '2d' && m?.dim === '3d';
-    if (na) {
+    if (el.dimSel.value === '2d' && m?.dim === '3d') {
       return `<tr><td><b>${r.label}</b><div class="rawnote">${r.raw}</div></td>
         <td colspan="2"><span class="na">3Dモードでのみ計測可</span></td></tr>`;
     }
     const c = REF.compare(actual, r.mean, r.sd);
     return `<tr>
       <td><b>${r.label}</b> <span class="tag l1">${r.level}</span>
-        <div class="rawnote">基準 ${r.mean}° ± ${r.sd}°（${REF.CITATIONS[r.cite].key}）</div>
+        <div class="rawnote">${evLabel}時点 ${(ev.t / 1000).toFixed(3)}s ／ 基準 ${r.mean}° ± ${r.sd}°（${REF.CITATIONS[r.cite].key}）</div>
         <div class="rawnote">${r.raw}</div>
         ${r.caution ? `<div class="caution">⚠ ${r.caution}</div>` : ''}
         ${note}</td>
@@ -753,13 +1065,121 @@ function renderCompare() {
     </tr>`;
   }).join('');
 
+  // 最大角速度（打撃のみ文献値あり）
+  let peakRows = '';
+  if (set.peaks?.length && state.seq) {
+    peakRows = set.peaks.map((pk) => {
+      const item = state.seq.items.find((x) => x.key === pk.key);
+      const c = item ? REF.compare(Math.abs(item.value), pk.mean, pk.sd) : null;
+      return `<tr>
+        <td><b>${pk.label}</b> <span class="tag l1">${pk.level}</span>
+          <div class="rawnote">基準 ${pk.mean} ± ${pk.sd} °/s（${REF.CITATIONS[pk.cite].key}）</div>
+          <div class="rawnote">${pk.raw}</div></td>
+        <td class="v">${c ? `${c.actual}°/s` : '—'}<div class="rawnote">${c ? `${c.diff >= 0 ? '+' : ''}${c.diff} / ${c.z}SD` : ''}</div></td>
+        <td>${c ? `<span class="verdict ${c.verdict.tone}">${c.verdict.label}</span>` : ''}</td>
+      </tr>`;
+    }).join('');
+  }
+
   el.compareTable.innerHTML = `<table class="cmp">
     <thead><tr><th>項目</th><th>実測</th><th>判定</th></tr></thead>
-    <tbody>${rows}</tbody></table>
-    <p class="hint">比較時刻: ${(f.t / 1000).toFixed(3)}s ／ 比較対象: ${set.label}</p>`;
+    <tbody>${rows}${peakRows}</tbody></table>
+    <p class="hint">比較対象: ${set.label}</p>`;
 }
 
+/** 打撃／投球で内容が切り替わる診断パネル */
 function renderSwingPanel() {
+  const set = REF.REFERENCE_SETS[el.refSetSel.value];
+  if (!set) return;
+  if (set.kind === 'pitch') renderPitchDiagnosis(set);
+  else renderBatDiagnosis(set);
+}
+
+/** 運動連鎖（骨盤→体幹→腕の順に最大角速度が出るか）と捻転差の最大値 */
+function renderSequenceBlock() {
+  if (!state.seq) return '';
+  const seq = state.seq;
+  const sep = state.maxSep;
+  const rows = seq.items.map((it) => `<div class="seqrow">
+      <span>${it.label}</span>
+      <span class="n">${Math.abs(it.value).toFixed(0)}<small style="color:var(--dim)">°/s</small></span>
+      <span class="tm">${(it.t / 1000).toFixed(3)}s</span>
+    </div>`).join('');
+  return `<div class="metric-big">
+    <div class="t">運動連鎖（最大角速度の順序）</div>
+    <div class="n" style="font-size:16px;color:${seq.correct ? 'var(--good)' : 'var(--warn)'}">
+      ${seq.correct ? '骨盤 → 体幹 → 腕 の順序どおり' : '順序が入れ替わっています'}
+    </div>
+    <div class="rawnote">実際の順序: ${seq.actualOrder.join(' → ')}</div>
+    <div class="seqbox">${rows}</div>
+    ${sep ? `<div class="t" style="margin-top:10px">捻転差の最大値</div>
+      <div class="n">${Math.abs(sep.value).toFixed(1)}<small>° （${(sep.t / 1000).toFixed(3)}s）</small></div>` : ''}
+    <div class="caution">下半身から上半身へ順に力が伝わる（proximal-to-distal）のが望ましいとされる順序です。
+      角速度は角度の微分（中心差分＋平滑化）から求めています。<b>フレームレートが低いほど最大値は小さく出ます</b>
+      — 特に肘の伸展は実際には2000°/sを超えるため、30fpsではまったく捉えられません。順序の判定には使えますが、
+      大きさの絶対値は120fps以上で撮影しない限り参考値です。撮影方向と検出精度の影響も受けます。
+      ${state.window ? `解析対象の時間帯: ${(state.window[0] / 1000).toFixed(2)}s 〜 ${(state.window[1] / 1000).toFixed(2)}s` : ''}</div>
+  </div>`;
+}
+
+/** イベント時点の角度をまとめて出す */
+function eventAngles(eventKey, ids) {
+  const ev = state.events[eventKey];
+  if (!ev) return `<div class="rawnote">${EV.EVENT_LABEL[eventKey]}が未検出です。「文献比較」タブで手動設定できます。</div>`;
+  const f = state.frames[ev.index] || frameAt(ev.t);
+  if (!f) return '';
+  return `<div class="seqbox">${ids.map((id) => {
+    const m = METRIC_BY_ID[id];
+    const v = adjust(id, f.angles[id]);
+    const na = el.dimSel.value === '2d' && m.dim === '3d';
+    return `<div class="seqrow"><span>${m.label}</span>
+      <span class="n">${na ? '<small style="color:var(--dim)">2Dでは不可</small>' : v == null ? '—' : `${v.toFixed(1)}<small style="color:var(--dim)">°</small>`}</span></div>`;
+  }).join('')}</div>`;
+}
+
+function renderPitchDiagnosis(set) {
+  el.diagNotice.innerHTML = `<div class="notice">
+    <b>投球として解析しています（${set.label}）</b><br>
+    踏込足の接地とリリースを骨格の動きから自動検出し、それぞれの時点の角度を見ます。
+    投球には打撃のアタックアングルに相当する「体格から決まる目標角度」の文献的な根拠がないため、
+    ここでは文献の基準値との比較と、運動連鎖の順序を示します。
+  </div>`;
+
+  const trail = set.trail, lead = set.lead;
+  el.swingPanel.innerHTML = `
+    <div class="metric-big">
+      <div class="t">リリース時点の角度</div>
+      ${eventAngles('release', [`elbow_${trail}`, `shoulder_elev_${trail}`, `shoulder_horiz_${trail}`,
+                                'trunk_lateral', 'trunk_sagittal', 'shoulder_rot'])}
+    </div>
+
+    <div class="metric-big">
+      <div class="t">踏込足の接地時点の角度</div>
+      ${eventAngles('foot_contact', [`knee_${lead}`, `hip_${lead}`, 'pelvis_rot', 'shoulder_rot', 'x_factor', 'trunk_lateral'])}
+    </div>
+
+    ${renderSequenceBlock()}
+
+    <div class="metric-big">
+      <div class="t">この解析で分かること・分からないこと</div>
+      <div class="rawnote" style="line-height:1.9">
+        測れる: 肘・膝・股関節の角度、体幹の傾き、肩と骨盤の回旋、捻転差、各部の最大角速度と順序<br>
+        <span style="color:#d3ab5a">測れない: 肩の最大外旋角（投球で最も重要な指標のひとつ）。
+        33点のランドマークには上腕の捻れを表す点が無いため、原理的に算出できません。</span>
+      </div>
+      <div class="caution">撮影は三塁側／一塁側から全身が入る位置を推奨します。回旋角は「構えの姿勢を基準にセット」を
+        セットポジションで押してから記録すると、文献と同じ基準になります。</div>
+    </div>`;
+}
+
+function renderBatDiagnosis(set) {
+  el.diagNotice.innerHTML = `<div class="notice warn">
+    <b>身長・体重から理想の関節角度を出す検証済みの式は文献に存在しません。</b><br>
+    ここでは ①文献が示すバットスピードと最適アタックアングルの関係 と
+    ②体格によるバットスピード補正（当アプリの推定）を組み合わせて目標値を出しています。
+    推定部分には <span class="tag l3">体格補正(推定)</span> を付けています。
+  </div>`;
+
   const h = +el.heightCm.value, m = +el.massKg.value;
   const anth = REF.anthropometry(h, m);
   const bat = REF.batRecommendation(h, m);
@@ -769,7 +1189,6 @@ function renderSwingPanel() {
     pitchType: el.pitchTypeSel.value,
   });
 
-  // 実測のスイング軌道角
   let measured = null, incoming = null, outgoing = null;
   if (state.impact) {
     const sp = swingPathAngle(state.gripTrack, state.impact.t);
@@ -788,7 +1207,6 @@ function renderSwingPanel() {
       ${val != null ? `<div class="mark" style="left:${pct(val)}"></div>` : ''}
     </div><div class="scale"><span>-20°</span><span>0°</span><span>+40°</span></div>`;
   };
-
   const diff = measured != null ? measured - ideal.distance.target : null;
 
   el.swingPanel.innerHTML = `
@@ -807,6 +1225,13 @@ function renderSwingPanel() {
       <div class="n">${ideal.contact.target}<small>° （許容 ${ideal.contact.lo}〜${ideal.contact.hi}°）</small></div>
       <div class="rawnote">投球の入射角と同じ角度で振ると、タイミングが多少ずれても良い当たりになりやすい（Nathan）。</div>
     </div>
+
+    <div class="metric-big">
+      <div class="t">インパクト時点の角度</div>
+      ${eventAngles('contact', [`elbow_${set.trail}`, `knee_${set.lead}`, `hip_${set.lead}`, 'trunk_lateral', 'pelvis_rot', 'x_factor'])}
+    </div>
+
+    ${renderSequenceBlock()}
 
     <div class="metric-big">
       <div class="t">ボール軌道の実測</div>
@@ -922,32 +1347,48 @@ el.btnRecord.onclick = toggleRecord;
 el.btnClear.onclick = clearRecording;
 el.btnCsv.onclick = exportCsv;
 el.scrub.oninput = () => {
+  if (state.playing) stopPlayback();
   const idx = Math.round((+el.scrub.value / 1000) * (state.frames.length - 1));
-  showFrame(idx);
+  showFrame(idx, true);
 };
-el.btnPlay.onclick = () => {
-  if (state.playing) { state.playing = false; el.btnPlay.textContent = '▶ 再生'; return; }
-  state.playing = true; el.btnPlay.textContent = '⏸ 一時停止';
-  let i = state.playIdx ?? 0;
-  const step = () => {
-    if (!state.playing) return;
-    if (i >= state.frames.length) { state.playing = false; el.btnPlay.textContent = '▶ 再生'; return; }
-    showFrame(i);
-    const dt = i + 1 < state.frames.length ? state.frames[i + 1].t - state.frames[i].t : 33;
-    i++;
-    setTimeout(step, Math.max(16, dt));
-  };
-  step();
+el.btnPlay.onclick = () => { if (state.playing) stopPlayback(); else startPlayback(); };
+el.btnStepBack.onclick = () => stepFrame(-1);
+el.btnStepFwd.onclick = () => stepFrame(1);
+el.speedSel.onchange = () => { if (state.playing && hasVideo()) el.video.playbackRate = +el.speedSel.value; };
+el.btnSetA.onclick = () => {
+  const f = state.frames[state.playIdx ?? 0]; if (!f) return;
+  state.loopA = f.t; renderAbLabel(); updateChart();
 };
+el.btnSetB.onclick = () => {
+  const f = state.frames[state.playIdx ?? 0]; if (!f) return;
+  state.loopB = f.t; renderAbLabel(); updateChart();
+};
+el.btnClearAB.onclick = () => { state.loopA = state.loopB = null; renderAbLabel(); updateChart(); };
 
-el.btnMarkEvent.onclick = () => {
-  const f = state.frames[state.playIdx ?? 0];
+// キーボード操作（入力欄にフォーカスがあるときは邪魔しない）
+window.addEventListener('keydown', (e) => {
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (['input', 'select', 'textarea', 'button'].includes(tag)) return;
+  if (!state.frames.length) return;
+  if (e.code === 'Space') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); stepFrame(e.shiftKey ? -10 : -1); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); stepFrame(e.shiftKey ? 10 : 1); }
+});
+
+/** イベントを今の再生位置に設定し直す（自動検出が外れたときの手動補正） */
+function setEventHere(key) {
+  const idx = state.playIdx ?? 0;
+  const f = state.frames[idx];
   if (!f) return;
-  state.eventT = f.t;
-  el.eventState.textContent = `イベント設定: ${(f.t / 1000).toFixed(3)}s（手動）`;
+  state.events = { ...state.events, [key]: { index: idx, t: f.t, confidence: 1, method: '手動で設定' } };
+  const set = REF.REFERENCE_SETS[el.refSetSel.value];
+  const primary = set.kind === 'bat' ? 'contact' : 'release';
+  state.eventT = state.events[primary]?.t ?? state.eventT;
   updateChart();
+  renderEvents();
   renderCompare();
-};
+  renderSwingPanel();
+}
 
 el.btnCalib.onclick = () => {
   const a = state.lastAngles;
@@ -962,7 +1403,28 @@ for (const id of ['heightCm', 'massKg', 'levelSel', 'batSpeed', 'pitchTypeSel'])
   el[id].addEventListener('change', renderSwingPanel);
   el[id].addEventListener('input', renderSwingPanel);
 }
-el.refSetSel.onchange = renderCompare;
+el.refSetSel.onchange = () => {
+  // 打撃／投球を切り替えたらイベントを検出し直す
+  if (state.frames.length) {
+    const set = REF.REFERENCE_SETS[el.refSetSel.value];
+    state.events = EV.detectEvents(state.frames, {
+      kind: set.kind, lead: set.lead, trail: set.trail,
+      ballTrajectory: state.ball.trajectory,
+      ballTimeOffset: state.ballTimeOffset,
+      impactT: state.impact ? state.impact.t - state.ballTimeOffset : null,
+    });
+    const win = EV.analysisWindow(state.events, set.kind);
+    state.window = win;
+    state.seq = EV.kineticSequence(state.frames, set.trail, win);
+    state.maxSep = EV.maxSeparation(state.frames, win);
+    const primary = set.kind === 'bat' ? 'contact' : 'release';
+    state.eventT = state.events[primary]?.t ?? state.events.foot_contact?.t ?? null;
+    updateChart();
+  }
+  renderEvents();
+  renderCompare();
+  renderSwingPanel();
+};
 
 document.querySelectorAll('.tab').forEach((t) => {
   t.onclick = () => {
@@ -975,6 +1437,12 @@ document.querySelectorAll('.tab').forEach((t) => {
 
 window.addEventListener('resize', () => { resizeOverlay(); chart.draw(); });
 el.video.addEventListener('loadeddata', resizeOverlay);
+el.video.addEventListener('seeked', () => {
+  if (pendingSeekSec == null) return;
+  const t = pendingSeekSec;
+  pendingSeekSec = null;
+  el.video.currentTime = t;
+});
 
 // アプリ本体をキャッシュしてオフラインでも起動できるようにする
 if ('serviceWorker' in navigator) {
