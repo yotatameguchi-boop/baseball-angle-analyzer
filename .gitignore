@@ -6,3 +6,7 @@ vendor/
 tests/fixtures/
 
 .DS_Store
+
+# ストーリー画像の生成ツールと出力
+tools/
+out/
