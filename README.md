@@ -18,6 +18,34 @@
 
 ## 使い方
 
+### Docker
+
+```bash
+docker compose up -d --build
+```
+
+<http://localhost:8080> を開く。モデルとランタイムはイメージに同梱されるので、
+起動後は外部通信なしで動きます（初回ビルドで約100MBを取得します）。
+
+**スマホから LAN 経由で使う場合は HTTPS が必要です。**
+カメラ（`getUserMedia`）は secure context でしか動かず、`http://192.168.x.x:8080` は
+secure context ではないためブロックされます。PC の IP を渡して作り直してください。
+
+```bash
+CERT_HOSTS=192.168.1.20 docker compose up -d --build
+```
+
+スマホから <https://192.168.1.20:8443> を開き、自己署名証明書の警告を承認すれば使えます。
+`CERT_HOSTS` を変えると証明書は自動で作り直されます。
+
+| 設定 | 内容 |
+|---|---|
+| `WITH_MODELS=false` | モデルを同梱せず実行時に CDN から取得。イメージが約120MB軽くなる |
+| `CERT_HOSTS` | 証明書の SAN に入れる IP / ホスト名をカンマ区切りで指定 |
+| ポート | 8080 → HTTP、8443 → HTTPS |
+
+### Docker を使わない場合
+
 ```bash
 ./fetch-assets.sh     # 任意。完全オフラインで使いたい場合のみ
 python3 server.py 8777
@@ -121,6 +149,10 @@ js/loader.js        モデル読込・キャッシュ・回線判定
 js/config.js        配信元（ローカル / CDN）の切替
 sw.js               Service Worker
 server.py           開発用サーバ（gzip・スレッド化）
+Dockerfile          nginx で配信するイメージ。モデルを同梱できる
+docker-compose.yml  8080(HTTP) / 8443(HTTPS) で公開
+docker/nginx.conf   MIME型・gzip・キャッシュ・Service Worker のスコープ
+docker/entrypoint.sh 自己署名証明書の生成（SAN が変わったら作り直す）
 tests/test.html     検証（幾何計算42項目 + 実写画像での姿勢推定）
 ```
 

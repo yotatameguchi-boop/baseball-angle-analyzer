@@ -1,0 +1,23 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        # false にするとモデルを同梱せず、実行時に CDN から取得する（イメージが約120MB軽くなる）
+        WITH_MODELS: "true"
+    image: baseball-angle-analyzer
+    container_name: baseball-angle-analyzer
+    ports:
+      - "8080:80"
+      - "8443:443"
+    environment:
+      # スマホから LAN 経由で開く場合、ここに PC の IP を入れてから再作成する。
+      # 例: CERT_HOSTS=192.168.1.20,mac.local
+      CERT_HOSTS: "${CERT_HOSTS:-}"
+    volumes:
+      # 証明書を保持して、起動のたびに変わらないようにする
+      - certs:/etc/nginx/certs
+    restart: unless-stopped
+
+volumes:
+  certs:

@@ -1,0 +1,14 @@
+.git
+.github
+out
+tools
+tests
+node_modules
+*.md
+!README.md
+server.py
+fetch-assets.sh
+.DS_Store
+# ビルド時に取得するので、ローカルの実体は送らない（約100MB）
+models
+vendor
