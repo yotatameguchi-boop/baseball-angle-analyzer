@@ -13,18 +13,18 @@ ARG GS=https://storage.googleapis.com/mediapipe-models
 RUN mkdir -p vendor/tasks-vision/wasm models && \
     if [ "$WITH_MODELS" = "true" ]; then \
       echo "▶ ランタイムを取得中…" && \
-      curl -fsSL -o vendor/tasks-vision/vision_bundle.mjs "$TV/vision_bundle.mjs" && \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o vendor/tasks-vision/vision_bundle.mjs "$TV/vision_bundle.mjs" && \
       for f in vision_wasm_internal.js vision_wasm_internal.wasm \
                vision_wasm_nosimd_internal.js vision_wasm_nosimd_internal.wasm; do \
-        curl -fsSL -o "vendor/tasks-vision/wasm/$f" "$TV/wasm/$f"; \
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "vendor/tasks-vision/wasm/$f" "$TV/wasm/$f"; \
       done && \
       echo "▶ 姿勢モデルを取得中…" && \
       for m in lite full heavy; do \
-        curl -fsSL -o "models/pose_landmarker_$m.task" \
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "models/pose_landmarker_$m.task" \
           "$GS/pose_landmarker/pose_landmarker_$m/float16/latest/pose_landmarker_$m.task"; \
       done && \
       echo "▶ 物体検出モデルを取得中…" && \
-      curl -fsSL -o models/efficientdet_lite0.tflite \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o models/efficientdet_lite0.tflite \
         "$GS/object_detector/efficientdet_lite0/float32/latest/efficientdet_lite0.tflite" && \
       du -sh vendor models; \
     else \
