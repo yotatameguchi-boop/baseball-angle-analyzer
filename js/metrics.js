@@ -1,5 +1,6 @@
 // 野球動作向けの関節角度の定義と計算
 import { sub, dot, cross, scale, normalize, mid, angleAt, angleBetween, projectOntoPlane } from './geom.js';
+import { OneEuroFilter } from './filters.js';
 
 // MediaPipe Pose の33ランドマーク
 export const LM = {
@@ -96,10 +97,10 @@ export const METRICS = [
     hint: '0°=下垂 / 90°=真横 / 180°=万歳。',
     arc: [LM.L_HIP, LM.L_SHOULDER, LM.L_ELBOW],
     calc: (p, fr) => armElevation(p, 'L', fr) },
-  { id: 'shoulder_horiz_R', label: '右肩 水平内外転', short: '右肩水平', group: '上肢', color: '#7bed9f', dim: '3d',
+  { id: 'shoulder_horiz_R', circular: true, label: '右肩 水平内外転', short: '右肩水平', group: '上肢', color: '#7bed9f', dim: '3d',
     hint: '+が前方(水平内転) / -が後方(水平外転)。腕の引き込み量の指標。',
     calc: (p, fr) => horizontalArm(p, 'R', fr) },
-  { id: 'shoulder_horiz_L', label: '左肩 水平内外転', short: '左肩水平', group: '上肢', color: '#badc58', dim: '3d',
+  { id: 'shoulder_horiz_L', circular: true, label: '左肩 水平内外転', short: '左肩水平', group: '上肢', color: '#badc58', dim: '3d',
     hint: '+が前方(水平内転) / -が後方(水平外転)。',
     calc: (p, fr) => horizontalArm(p, 'L', fr) },
 
@@ -107,19 +108,19 @@ export const METRICS = [
   { id: 'trunk_tilt', label: '体幹 傾斜角', short: '体幹傾斜', group: '体幹', color: '#4fc3f7', dim: 'both',
     hint: '鉛直に対する体幹の総合的な傾き。0°=直立。',
     calc: (p, fr) => angleBetween(sub(fr.shC, fr.hipC), UP) },
-  { id: 'trunk_lateral', label: '体幹 側屈角(画面)', short: '体幹側屈', group: '体幹', color: '#00d2d3', dim: 'both',
+  { id: 'trunk_lateral', circular: true, label: '体幹 側屈角(画面)', short: '体幹側屈', group: '体幹', color: '#00d2d3', dim: 'both',
     hint: '画面内の左右の倒れ。+が画面右へ傾く。',
     calc: (p, fr) => { const v = sub(fr.shC, fr.hipC); return Math.atan2(v.x, -v.y) * RAD; } },
-  { id: 'trunk_sagittal', label: '体幹 前後傾角(奥行)', short: '体幹前後傾', group: '体幹', color: '#54a0ff', dim: '3d',
+  { id: 'trunk_sagittal', circular: true, label: '体幹 前後傾角(奥行)', short: '体幹前後傾', group: '体幹', color: '#54a0ff', dim: '3d',
     hint: '奥行き方向の倒れ。+がカメラ側へ前傾。',
     calc: (p, fr) => { const v = sub(fr.shC, fr.hipC); return Math.atan2(-(v.z ?? 0), -v.y) * RAD; } },
-  { id: 'shoulder_rot', label: '肩ライン 回旋角', short: '肩回旋', group: '体幹', color: '#c56cf0', dim: '3d',
+  { id: 'shoulder_rot', circular: true, label: '肩ライン 回旋角', short: '肩回旋', group: '体幹', color: '#c56cf0', dim: '3d',
     hint: '水平面での肩の向き。0°=カメラに正対 / +90°=画面右向き。',
     calc: (p) => facingAngle(sub(p[LM.R_SHOULDER], p[LM.L_SHOULDER])) },
-  { id: 'pelvis_rot', label: '骨盤ライン 回旋角', short: '骨盤回旋', group: '体幹', color: '#e056fd', dim: '3d',
+  { id: 'pelvis_rot', circular: true, label: '骨盤ライン 回旋角', short: '骨盤回旋', group: '体幹', color: '#e056fd', dim: '3d',
     hint: '水平面での骨盤の向き。0°=カメラに正対。',
     calc: (p) => facingAngle(sub(p[LM.R_HIP], p[LM.L_HIP])) },
-  { id: 'x_factor', label: '捻転差 (X-Factor)', short: '捻転差', group: '体幹', color: '#ff6b81', dim: '3d',
+  { id: 'x_factor', circular: true, label: '捻転差 (X-Factor)', short: '捻転差', group: '体幹', color: '#ff6b81', dim: '3d',
     hint: '肩回旋 − 骨盤回旋。上半身と下半身のねじれ差。',
     calc: (p) => wrapDeg(
       facingAngle(sub(p[LM.R_SHOULDER], p[LM.L_SHOULDER])) - facingAngle(sub(p[LM.R_HIP], p[LM.L_HIP]))) },
@@ -205,24 +206,34 @@ export function computeAngles(world, pixels, mode) {
   return { angles: out, conf };
 }
 
-/** 角度の連続性を保った指数移動平均（±180°をまたぐ量にも対応） */
+/**
+ * ライブ表示用の平滑化。1€ フィルタ（Casiez et al., CHI 2012）を角度ごとに掛ける。
+ * 記録済みデータには filters.js の smoothRecorded（ゼロ位相バターワース）を使うこと。
+ */
 export class AngleSmoother {
-  constructor(alpha = 0.35) { this.alpha = alpha; this.state = {}; }
-  reset() { this.state = {}; }
-  apply(angles) {
-    const a = this.alpha;
-    if (a >= 1) return angles;
+  constructor(opts = {}) { this.opts = opts; this.filters = {}; this.enabled = true; }
+  reset() { this.filters = {}; }
+
+  apply(angles, tMs = performance.now()) {
+    if (!this.enabled) return angles;
     const out = {};
     for (const [k, v] of Object.entries(angles)) {
       if (v == null) { out[k] = null; continue; }
-      const prev = this.state[k];
-      if (prev == null) { out[k] = v; }
-      else {
-        // 周期量は最短差分で補間する
-        const wrapped = METRIC_BY_ID[k]?.id && Math.abs(v - prev) > 180 ? v + (v < prev ? 360 : -360) : v;
-        out[k] = wrapDeg(prev + a * (wrapped - prev)) ?? v;
+      if (!this.filters[k]) this.filters[k] = new OneEuroFilter(this.opts);
+      const m = METRIC_BY_ID[k];
+      if (m?.circular) {
+        // 周期量は ±180 をまたぐので、前回値からの最短差分で連続にしてから掛ける
+        const f = this.filters[k];
+        const prev = f.x.last;
+        let x = v;
+        if (prev != null) {
+          while (x - prev > 180) x -= 360;
+          while (x - prev < -180) x += 360;
+        }
+        out[k] = wrapDeg(f.filter(x, tMs));
+      } else {
+        out[k] = this.filters[k].filter(v, tMs);
       }
-      this.state[k] = out[k];
     }
     return out;
   }

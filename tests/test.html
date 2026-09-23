@@ -13,6 +13,7 @@ import { computeAngles, LM, METRICS } from '../js/metrics.js';
 import { pathAngle, detectImpact } from '../js/ball.js';
 import { angleAt, angleBetween } from '../js/geom.js';
 import * as REF from '../js/reference.js';
+import { butterworthZeroLag, hampel, interpolateGaps, unwrapDeg, OneEuroFilter, smoothRecorded } from '../js/filters.js';
 
 const out = document.getElementById('out');
 let pass = 0, fail = 0;
@@ -158,6 +159,49 @@ section('基準値モデル');
   ok('比較: 4.5SD離れれば「大きく外れ」', c2.verdict.key === 'out' ? 1 : 0, 1);
   const an = REF.anthropometry(180, 80);
   ok('身長180cmの大腿長 ≈ 44.1cm', an.segments.thigh, 44.1, 0.2);
+}
+
+section('フィルタ（Sports2D の方針に準拠）');
+{
+  const fsF = 120, NF = 600, tt = (i) => i / fsF;
+  ok('直流は素通り（ゲイン1）',
+     Math.max(...butterworthZeroLag(new Array(NF).fill(42), 6, fsF).map((v) => Math.abs(v - 42))), 0, 1e-6);
+
+  const sine = (f) => Array.from({ length: NF }, (_, i) => Math.sin(2 * Math.PI * f * tt(i)));
+  const amp = (a) => Math.max(...a.slice(100, 500).map(Math.abs));
+  ok('1Hz は振幅を保つ', amp(butterworthZeroLag(sine(1), 6, fsF)) / amp(sine(1)), 1, 0.05);
+  ok('30Hz は減衰する', amp(butterworthZeroLag(sine(30), 6, fsF)) < 0.05 ? 1 : 0, 1);
+
+  // 位相遅れゼロ（単峰パルスのピーク位置が動かない）
+  const c = 300, w = 25;
+  const pulse = Array.from({ length: NF }, (_, i) => Math.exp(-((i - c) ** 2) / (2 * w * w)));
+  const fp = butterworthZeroLag(pulse, 6, fsF);
+  const peakAt = (a) => a.reduce((bi, v, i, arr) => (v > arr[bi] ? i : bi), 0);
+  ok('位相遅れがない', Math.abs(peakAt(fp) - c) <= 1 ? 1 : 0, 1);
+
+  // 外れ値の除去（隣接フレームを壊さないこと）
+  const base = Array.from({ length: 60 }, (_, i) => 120 + 50 * Math.sin(2 * Math.PI * 0.6 * i / 30));
+  const spiked = base.slice(); spiked[25] += 45;
+  const hp = hampel(spiked, 4).series;
+  ok('外れ値の棘を除去', Math.abs(hp[25] - base[25]) < 8 ? 1 : 0, 1);
+  ok('隣接フレームを壊さない',
+     (Math.abs(hp[24] - base[24]) < 5 && Math.abs(hp[26] - base[26]) < 5) ? 1 : 0, 1);
+  ok('棘が無ければ何も置換しない', hampel(base, 4).replaced, 0);
+
+  ok('欠測を線形補間', interpolateGaps([0, 1, null, null, 4, 5], 10)[2], 2, 1e-9);
+  ok('長すぎる欠測は残す', interpolateGaps([0, ...Array(20).fill(null), 21], 10)[5], null);
+  ok('±180をまたいでも連続', unwrapDeg([170, 178, -175, -168])[2], 185, 1e-9);
+
+  // 回旋角（周期量）を通しても範囲外にならない
+  const circ = Array.from({ length: 200 }, (_, i) => (((170 + i * 0.3) + 180) % 360) - 180);
+  const cs = smoothRecorded(circ, { fs: 60, cutoff: 6, circular: true });
+  ok('回旋角が ±180 に収まる', cs.every((v) => v >= -180.01 && v <= 180.01) ? 1 : 0, 1);
+
+  // 1€ フィルタ
+  const f1 = new OneEuroFilter();
+  let L = 0;
+  for (let i = 0; i < 200; i++) L = f1.filter(i * 2, i * 1000 / 60);
+  ok('1€ は速い動きでも遅れが小さい', Math.abs(L - 398) < 12 ? 1 : 0, 1);
 }
 
 section('メトリクス定義の健全性');

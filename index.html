@@ -84,9 +84,16 @@
           <option value="2d">2D（画面上の見た目の角度）</option>
         </select>
       </label>
-      <label class="field">スムージング <span id="smoothVal" class="val">0.35</span>
-        <input type="range" id="smoothing" min="0" max="0.9" step="0.05" value="0.35">
+      <label class="field">フィルタ（記録データ）
+        <select id="filterCutoff">
+          <option value="0">なし（生データ）</option>
+          <option value="4">4 Hz — 強め</option>
+          <option value="6" selected>6 Hz — 標準</option>
+          <option value="10">10 Hz — 弱め</option>
+          <option value="15">15 Hz — 最小</option>
+        </select>
       </label>
+      <p class="hint">記録後に Hampel で外れ値を除いてから、ゼロ位相のバターワース低域通過をかけます（生体力学の標準手法）。ライブ表示は 1€ フィルタです。</p>
       <div class="checks">
         <label><input type="checkbox" id="chkMirror"> 左右反転</label>
         <label><input type="checkbox" id="chkSkeleton" checked> 骨格を表示</label>

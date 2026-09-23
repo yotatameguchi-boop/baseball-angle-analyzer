@@ -23,12 +23,13 @@ export function landmarkSpeed(frames, idx) {
 
 /**
  * 角度の時系列から角速度(度/秒)を求める。周期量は最短差分で扱う。
- * 隣接フレームの差分をそのまま使うと、姿勢推定の揺れが増幅されて
- * 非現実的な大きさになるため、中心差分＋移動平均で平滑化する。
+ * 角度そのものは記録後に Hampel＋ゼロ位相バターワースで平滑化済みなので、
+ * ここでは中心差分を取るだけでよい（以前は生データを微分していたため、
+ * 追加の移動平均でごまかす必要があった）。
  */
-export function angularVelocity(frames, metricId, wrap = false, half = 2) {
+export function angularVelocity(frames, metricId, wrap = false, half = 1) {
   const n = frames.length;
-  const raw = new Array(n).fill(null);
+  const out = new Array(n).fill(null);
   for (let i = 0; i < n; i++) {
     const lo = Math.max(0, i - half), hi = Math.min(n - 1, i + half);
     if (hi === lo) continue;
@@ -37,17 +38,7 @@ export function angularVelocity(frames, metricId, wrap = false, half = 2) {
     if (dt <= 0 || a == null || b == null) continue;
     let d = b - a;
     if (wrap) { while (d > 180) d -= 360; while (d < -180) d += 360; }
-    raw[i] = d / dt;
-  }
-  // 5点移動平均
-  const out = new Array(n).fill(null);
-  for (let i = 0; i < n; i++) {
-    let sum = 0, cnt = 0;
-    for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) {
-      if (raw[j] == null) continue;
-      sum += raw[j]; cnt++;
-    }
-    if (cnt) out[i] = sum / cnt;
+    out[i] = d / dt;
   }
   return out;
 }

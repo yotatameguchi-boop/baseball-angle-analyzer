@@ -30,9 +30,15 @@ export const CITATIONS = {
     url: 'https://www.abca.org/magazine/magazine/2019-3-May_June/The_Hot_Corner_In_Pursuit_of_the_Optimal_Swing.aspx',
     note: '速球の入射角 約-6°、変化球 約-10°。最適アタックアングルは概ね +2〜+14°で、バットスピードが遅いほど大きい(遅い場合 約21°)。',
   },
+  sports2d: {
+    key: 'Sports2D',
+    text: 'Pagnon, D. & Kim, H. (2024). Sports2D: Compute 2D human pose and angles from a video or a webcam. Journal of Open Source Software, 9(101), 6849.',
+    url: 'https://joss.theoj.org/papers/10.21105/joss.06849',
+    note: '査読済みのオープンソース（BSD-3）。本アプリのフィルタ方針（Hampel で外れ値除去 → ゼロ位相バターワース低域通過 6Hz）は同ツールの既定処理に倣っている。',
+  },
   winter: {
     key: 'Winter / De Leva',
-    text: 'Winter, D. A. "Biomechanics and Motor Control of Human Movement"／De Leva (1996) の人体計測（体節長の身長比）。',
+    text: 'Winter, D. A. "Biomechanics and Motor Control of Human Movement"／De Leva (1996) の人体計測（体節長の身長比）。バターワース低域通過の二重通過とカットオフ補正も同書による。',
     url: 'https://pubmed.ncbi.nlm.nih.gov/8872282/',
     note: '身長から体節長を推定する比率。体格補正の土台に使用。',
   },

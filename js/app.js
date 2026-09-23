@@ -5,6 +5,7 @@ import { BallTracker, detectImpact, analyzeImpact, swingPathAngle, pathAngle } f
 import { TimeChart } from './chart.js';
 import * as REF from './reference.js';
 import * as EV from './events.js';
+import { smoothRecorded } from './filters.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -15,7 +16,7 @@ const el = {
   btnAnalyzeFile: $('btnAnalyzeFile'), btnCancelAnalyze: $('btnCancelAnalyze'),
   analyzeFps: $('analyzeFps'),
   analyzeProgress: $('analyzeProgress'),
-  modelSel: $('modelSel'), dimSel: $('dimSel'), smoothing: $('smoothing'), smoothVal: $('smoothVal'),
+  modelSel: $('modelSel'), dimSel: $('dimSel'), filterCutoff: $('filterCutoff'),
   chkMirror: $('chkMirror'), chkSkeleton: $('chkSkeleton'), chkArcs: $('chkArcs'),
   presetSel: $('presetSel'),
   chkBall: $('chkBall'), chkBallDebug: $('chkBallDebug'),
@@ -54,7 +55,7 @@ const state = {
   mediaRecorder: null, recChunks: [], recordedUrl: null, ballTimeOffset: 0,
   // frames[].t のうち、動画の 0 秒に対応する時刻（録画開始の遅れを吸収する）
   videoTimeOffset: 0, captureT0: null,
-  eventT: null, impact: null, events: {}, seq: null, maxSep: null, window: null,
+  eventT: null, impact: null, events: {}, seq: null, maxSep: null, window: null, filterInfo: '',
   calib: null,
   visible: new Set(),
   seriesOff: new Set(),
@@ -375,13 +376,17 @@ function processFrame(tMs) {
     const W = el.overlay.width, H = el.overlay.height;
     const pixels = norm.map((p) => ({ x: p.x * W, y: p.y * H, z: 0, visibility: p.visibility }));
     const r = computeAngles(world, pixels, el.dimSel.value);
-    angles = state.smoother.apply(r.angles);
+    // 表示はライブ用の平滑化、保存は生の値。記録後にまとめてフィルタをかける。
+    angles = state.smoother.apply(r.angles, tMs);
     conf = r.conf;
     state.lastAngles = angles; state.lastConf = conf; state.lastLandmarks = norm;
 
     if (state.recording) {
       const t = tMs - state.recT0;
-      state.frames.push({ t, angles: { ...angles }, conf, lm: norm.map((p) => ({ x: p.x, y: p.y, v: p.visibility })) });
+      state.frames.push({
+        t, rawAngles: { ...r.angles }, angles: { ...r.angles }, conf,
+        lm: norm.map((p) => ({ x: p.x, y: p.y, v: p.visibility })),
+      });
       const grip = gripPx(norm);
       if (grip) state.gripTrack.push({ t: tMs, x: grip.x * v.videoWidth, y: grip.y * v.videoHeight });
     }
@@ -688,8 +693,41 @@ function clearRecording() {
   renderSwingPanel();
 }
 
+/**
+ * 記録済みの角度系列にフィルタをかける。
+ * Hampel で外れ値を除き、欠測を補間し、ゼロ位相バターワースで平滑化する。
+ * 生の値は rawAngles に残してあるので、設定を変えれば掛け直せる。
+ */
+function applyRecordedFilter() {
+  const F = state.frames;
+  if (F.length < 6) return;
+  const cutoff = +el.filterCutoff.value;
+
+  if (!cutoff) {
+    for (const f of F) f.angles = { ...f.rawAngles };
+    state.filterInfo = 'フィルタなし（生データ）';
+    return;
+  }
+  // 実際のフレーム間隔からサンプリング周波数を求める
+  const dur = (F[F.length - 1].t - F[0].t) / 1000;
+  const fs = dur > 0 ? (F.length - 1) / dur : 30;
+  if (!(fs > 0) || cutoff >= fs / 2) {
+    for (const f of F) f.angles = { ...f.rawAngles };
+    state.filterInfo = `フィルタなし（${fs.toFixed(0)}fps ではカットオフ ${cutoff}Hz を適用できません）`;
+    return;
+  }
+
+  for (const m of METRICS) {
+    const series = F.map((f) => f.rawAngles?.[m.id] ?? null);
+    const sm = smoothRecorded(series, { fs, cutoff, circular: !!m.circular });
+    F.forEach((f, i) => { f.angles[m.id] = sm[i]; });
+  }
+  state.filterInfo = `${cutoff}Hz ゼロ位相バターワース（実測 ${fs.toFixed(0)}fps）`;
+}
+
 function finishRecording() {
   if (!state.frames.length) return;
+  applyRecordedFilter();
   for (const b of [el.btnPlay, el.scrub, el.btnCsv, el.btnClear,
                    el.btnStepBack, el.btnStepFwd, el.btnSetA, el.btnSetB, el.btnClearAB]) b.disabled = false;
 
@@ -1115,7 +1153,8 @@ function renderSequenceBlock() {
     ${sep ? `<div class="t" style="margin-top:10px">捻転差の最大値</div>
       <div class="n">${Math.abs(sep.value).toFixed(1)}<small>° （${(sep.t / 1000).toFixed(3)}s）</small></div>` : ''}
     <div class="caution">下半身から上半身へ順に力が伝わる（proximal-to-distal）のが望ましいとされる順序です。
-      角速度は角度の微分（中心差分＋平滑化）から求めています。<b>フレームレートが低いほど最大値は小さく出ます</b>
+      角度は Hampel で外れ値を除いたうえでゼロ位相バターワースをかけ、その中心差分から角速度を求めています
+      （${state.filterInfo || '設定なし'}）。<b>フレームレートが低いほど最大値は小さく出ます</b>
       — 特に肘の伸展は実際には2000°/sを超えるため、30fpsではまったく捉えられません。順序の判定には使えますが、
       大きさの絶対値は120fps以上で撮影しない限り参考値です。撮影方向と検出精度の影響も受けます。
       ${state.window ? `解析対象の時間帯: ${(state.window[0] / 1000).toFixed(2)}s 〜 ${(state.window[1] / 1000).toFixed(2)}s` : ''}</div>
@@ -1313,11 +1352,18 @@ el.btnAnalyzeFile.onclick = analyzeFile;
 el.btnCancelAnalyze.onclick = () => { state.cancelAnalyze = true; };
 el.modelSel.onchange = () => { state.landmarker = null; ensureModel(); };
 el.dimSel.onchange = () => { state.smoother.reset(); renderCards(state.lastAngles, state.lastConf); renderCompare(); };
-el.smoothing.oninput = () => {
-  el.smoothVal.textContent = (+el.smoothing.value).toFixed(2);
-  state.smoother.alpha = 1 - +el.smoothing.value; // スライダーは「平滑化の強さ」
+el.filterCutoff.onchange = () => {
+  if (!state.frames.length) return;
+  applyRecordedFilter();
+  // フィルタを変えたらイベントと解析もやり直す
+  const set = REF.REFERENCE_SETS[el.refSetSel.value];
+  state.seq = EV.kineticSequence(state.frames, set.trail, state.window);
+  state.maxSep = EV.maxSeparation(state.frames, state.window);
+  updateChart();
+  if (state.playIdx != null) showFrame(state.playIdx, false);
+  renderCompare();
+  renderSwingPanel();
 };
-state.smoother.alpha = 1 - +el.smoothing.value;
 el.presetSel.onchange = applyPreset;
 el.ballTh.oninput = () => { el.ballThVal.textContent = el.ballTh.value; state.ball.diffThreshold = +el.ballTh.value; };
 const syncBallSize = () => {
