@@ -10,3 +10,7 @@ tests/fixtures/
 # ストーリー画像の生成ツールと出力
 tools/
 out/
+.vercel
+
+# Vercel CLI のリンク情報
+.vercel
