@@ -6,6 +6,7 @@ import { TimeChart } from './chart.js';
 import * as REF from './reference.js';
 import * as EV from './events.js';
 import { smoothRecorded } from './filters.js';
+import { Lifter, applyToWorld, H36M } from './lift.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -17,6 +18,7 @@ const el = {
   analyzeFps: $('analyzeFps'),
   analyzeProgress: $('analyzeProgress'),
   modelSel: $('modelSel'), dimSel: $('dimSel'), filterCutoff: $('filterCutoff'),
+  chkLift: $('chkLift'), liftHint: $('liftHint'),
   chkMirror: $('chkMirror'), chkSkeleton: $('chkSkeleton'), chkArcs: $('chkArcs'),
   presetSel: $('presetSel'),
   chkBall: $('chkBall'), chkBallDebug: $('chkBallDebug'),
@@ -63,6 +65,7 @@ const state = {
   cancelAnalyze: false,
   lastBall: null, ballCands: [],
   rec: null, lastProcessed: 0, detectorLoaded: false, skipped: 0, usingCpu: false,
+  lifter: new Lifter(), liftInfo: '',
 };
 
 const chart = new TimeChart(el.chart, {
@@ -386,6 +389,8 @@ function processFrame(tMs) {
       state.frames.push({
         t, rawAngles: { ...r.angles }, angles: { ...r.angles }, conf,
         lm: norm.map((p) => ({ x: p.x, y: p.y, v: p.visibility })),
+        // リフティング後に角度を計算し直すため、元の3Dも残す
+        world: world.map((p) => ({ x: p.x, y: p.y, z: p.z, visibility: p.visibility })),
       });
       const grip = gripPx(norm);
       if (grip) state.gripTrack.push({ t: tMs, x: grip.x * v.videoWidth, y: grip.y * v.videoHeight });
@@ -576,7 +581,7 @@ async function analyzeFile() {
   el.btnCancelAnalyze.hidden = true;
   el.analyzeProgress.hidden = true;
   bar.style.width = '0%';
-  finishRecording();
+  await finishRecording();
   setStatus(`解析完了 ${state.frames.length} フレーム（${fps}fps）`, 'on');
 }
 
@@ -602,7 +607,7 @@ async function toggleRecord() {
     el.btnRecord.disabled = true;
     try {
       const blob = await stopVideoCapture();
-      finishRecording();
+      await finishRecording();
       if (blob) await attachRecordedVideo(blob);
     } finally {
       el.btnRecord.disabled = false;
@@ -725,8 +730,71 @@ function applyRecordedFilter() {
   state.filterInfo = `${cutoff}Hz ゼロ位相バターワース（実測 ${fs.toFixed(0)}fps）`;
 }
 
-function finishRecording() {
+/**
+ * 記録済みの2D系列を3Dに持ち上げ、角度を計算し直す。
+ * 単眼の奥行き推定が安定し、回旋角のブレが減る。
+ */
+async function applyLifting() {
+  state.liftInfo = '';
+  if (!el.chkLift.checked || !state.frames.length) return;
+  const url = LOAD.ASSETS.lift?.url;
+  if (!url) {
+    state.liftInfo = 'この配信環境ではリフティングモデルを利用できません';
+    return;
+  }
+  const v = el.video;
+  const W = v.videoWidth || 1280, H = v.videoHeight || 720;
+  try {
+    showLoading(true, '3Dリフティングモデルを準備中…', 0);
+    await state.lifter.init(url, (u) => LOAD.loadModelBytes(u, (loaded, total, cached) => {
+      const pct = total ? (loaded / total) * 100 : 0;
+      el.loadingBar.style.width = `${pct}%`;
+      el.loadingText.textContent = cached
+        ? '3Dリフティングモデルを読み込み中…（保存済み）'
+        : `3Dリフティングモデルをダウンロード中… ${LOAD.fmtBytes(loaded)} / ${LOAD.fmtBytes(total || LOAD.ASSETS.lift.bytes)}`;
+    }));
+
+    showLoading(true, '3D姿勢を推定中…', 0);
+    const lifted = await state.lifter.lift(state.frames, W, H, (done, all) => {
+      el.loadingBar.style.width = `${(done / all * 100).toFixed(0)}%`;
+      el.loadingText.textContent = `3D姿勢を推定中… ${done}/${all}`;
+    });
+    if (!lifted) { state.liftInfo = '3D推定に失敗しました'; return; }
+
+    // 持ち上げた座標は正規化スケールなので、元の胴体長に合わせてから差し替える
+    let replaced = 0;
+    state.frames.forEach((f, i) => {
+      if (!f.world || !lifted[i]) return;
+      const h = lifted[i];
+      const torsoL = Math.hypot(h[H36M.THORAX][0] - h[H36M.HIP][0],
+                                h[H36M.THORAX][1] - h[H36M.HIP][1],
+                                h[H36M.THORAX][2] - h[H36M.HIP][2]);
+      const shC = { x: (f.world[LM.L_SHOULDER].x + f.world[LM.R_SHOULDER].x) / 2,
+                    y: (f.world[LM.L_SHOULDER].y + f.world[LM.R_SHOULDER].y) / 2,
+                    z: (f.world[LM.L_SHOULDER].z + f.world[LM.R_SHOULDER].z) / 2 };
+      const torsoW = Math.hypot(shC.x, shC.y, shC.z);   // world は腰中心が原点
+      if (!(torsoL > 1e-6) || !(torsoW > 1e-6)) return;
+      const k = torsoW / torsoL;
+      const scaled = h.map((p) => [p[0] * k, p[1] * k, p[2] * k]);
+      const w = applyToWorld(f.world, scaled);
+      const px = f.lm.map((p) => ({ x: p.x * W, y: p.y * H, z: 0, visibility: p.v }));
+      const r = computeAngles(w, px, el.dimSel.value);
+      f.rawAngles = r.angles;
+      f.angles = { ...r.angles };
+      replaced++;
+    });
+    state.liftInfo = `3Dリフティング適用済み（${replaced}/${state.frames.length} フレーム）`;
+  } catch (e) {
+    console.warn('3Dリフティングに失敗', e);
+    state.liftInfo = `3Dリフティングに失敗: ${e.message}`;
+  } finally {
+    showLoading(false);
+  }
+}
+
+async function finishRecording() {
   if (!state.frames.length) return;
+  await applyLifting();
   applyRecordedFilter();
   for (const b of [el.btnPlay, el.scrub, el.btnCsv, el.btnClear,
                    el.btnStepBack, el.btnStepFwd, el.btnSetA, el.btnSetB, el.btnClearAB]) b.disabled = false;
@@ -1154,7 +1222,7 @@ function renderSequenceBlock() {
       <div class="n">${Math.abs(sep.value).toFixed(1)}<small>° （${(sep.t / 1000).toFixed(3)}s）</small></div>` : ''}
     <div class="caution">下半身から上半身へ順に力が伝わる（proximal-to-distal）のが望ましいとされる順序です。
       角度は Hampel で外れ値を除いたうえでゼロ位相バターワースをかけ、その中心差分から角速度を求めています
-      （${state.filterInfo || '設定なし'}）。<b>フレームレートが低いほど最大値は小さく出ます</b>
+      （${state.filterInfo || '設定なし'}${state.liftInfo ? ' ／ ' + state.liftInfo : ''}）。<b>フレームレートが低いほど最大値は小さく出ます</b>
       — 特に肘の伸展は実際には2000°/sを超えるため、30fpsではまったく捉えられません。順序の判定には使えますが、
       大きさの絶対値は120fps以上で撮影しない限り参考値です。撮影方向と検出精度の影響も受けます。
       ${state.window ? `解析対象の時間帯: ${(state.window[0] / 1000).toFixed(2)}s 〜 ${(state.window[1] / 1000).toFixed(2)}s` : ''}</div>
@@ -1352,10 +1420,26 @@ el.btnAnalyzeFile.onclick = analyzeFile;
 el.btnCancelAnalyze.onclick = () => { state.cancelAnalyze = true; };
 el.modelSel.onchange = () => { state.landmarker = null; ensureModel(); };
 el.dimSel.onchange = () => { state.smoother.reset(); renderCards(state.lastAngles, state.lastConf); renderCompare(); };
-el.filterCutoff.onchange = () => {
+el.chkLift.onchange = async () => {
   if (!state.frames.length) return;
+  if (!el.chkLift.checked) {
+    // 元の MediaPipe の3Dから計算し直す
+    const v = el.video, W = v.videoWidth || 1280, H = v.videoHeight || 720;
+    for (const f of state.frames) {
+      if (!f.world) continue;
+      const px = f.lm.map((p) => ({ x: p.x * W, y: p.y * H, z: 0, visibility: p.v }));
+      const r = computeAngles(f.world, px, el.dimSel.value);
+      f.rawAngles = r.angles;
+    }
+    state.liftInfo = '';
+  } else {
+    await applyLifting();
+  }
   applyRecordedFilter();
-  // フィルタを変えたらイベントと解析もやり直す
+  recomputeAnalysis();
+};
+
+function recomputeAnalysis() {
   const set = REF.REFERENCE_SETS[el.refSetSel.value];
   state.seq = EV.kineticSequence(state.frames, set.trail, state.window);
   state.maxSep = EV.maxSeparation(state.frames, state.window);
@@ -1363,6 +1447,12 @@ el.filterCutoff.onchange = () => {
   if (state.playIdx != null) showFrame(state.playIdx, false);
   renderCompare();
   renderSwingPanel();
+}
+
+el.filterCutoff.onchange = () => {
+  if (!state.frames.length) return;
+  applyRecordedFilter();
+  recomputeAnalysis();
 };
 el.presetSel.onchange = applyPreset;
 el.ballTh.oninput = () => { el.ballThVal.textContent = el.ballTh.value; state.ball.diffThreshold = +el.ballTh.value; };

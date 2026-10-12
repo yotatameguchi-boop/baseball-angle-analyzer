@@ -8,9 +8,9 @@ tests/fixtures/
 .DS_Store
 
 # ストーリー画像の生成ツールと出力
-tools/
+tools/*
+!tools/make-lift-model.sh
 out/
-.vercel
 
 # Vercel CLI のリンク情報
 .vercel

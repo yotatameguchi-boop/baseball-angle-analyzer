@@ -18,6 +18,7 @@ const LOCAL = {
     pose_full: localUrl('../models/pose_landmarker_full.task'),
     pose_heavy: localUrl('../models/pose_landmarker_heavy.task'),
     detector: localUrl('../models/efficientdet_lite0.tflite'),
+    lift: localUrl('../models/motionbert_3d_27_int8.onnx'),
   },
 };
 
@@ -29,6 +30,9 @@ const CDN = {
     pose_full: `${GS}/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task`,
     pose_heavy: `${GS}/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task`,
     detector: `${GS}/object_detector/efficientdet_lite0/float32/latest/efficientdet_lite0.tflite`,
+    // 量子化済みのリフティングモデルは公開配信していないため、
+    // 同梱のある環境（Docker / Vercel / ローカル）でのみ利用できる
+    lift: null,
   },
 };
 

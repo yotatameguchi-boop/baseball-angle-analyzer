@@ -94,6 +94,10 @@
         </select>
       </label>
       <p class="hint">記録後に Hampel で外れ値を除いてから、ゼロ位相のバターワース低域通過をかけます（生体力学の標準手法）。ライブ表示は 1€ フィルタです。</p>
+      <div class="checks" style="margin-top:10px">
+        <label><input type="checkbox" id="chkLift"> 3Dリフティングを使う（+43MB）</label>
+      </div>
+      <p class="hint" id="liftHint">単眼カメラの奥行き推定をニューラルモデルで補正し、回旋角のブレを減らします（実測で約65%減）。記録データにのみ適用。モデルは Human3.6M で学習されており<b>学術研究用途に限定</b>されます。</p>
       <div class="checks">
         <label><input type="checkbox" id="chkMirror"> 左右反転</label>
         <label><input type="checkbox" id="chkSkeleton" checked> 骨格を表示</label>

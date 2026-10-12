@@ -14,6 +14,7 @@ const META = {
   pose_full:  { bytes: 9398198,  label: '姿勢モデル Full' },
   pose_heavy: { bytes: 30664242, label: '姿勢モデル Heavy' },
   detector:   { bytes: 13836895, label: '物体検出モデル' },
+  lift:       { bytes: 43121049, label: '3Dリフティングモデル' },
 };
 
 // url は配信元が確定してから引くので getter にしておく
