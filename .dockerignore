@@ -12,3 +12,5 @@ fetch-assets.sh
 # ビルド時に取得するので、ローカルの実体は送らない（約100MB）
 models
 vendor
+# ただし3Dリフティングモデルだけは公開配信が無いので、あれば同梱する
+!models/motionbert_3d_27_int8.onnx

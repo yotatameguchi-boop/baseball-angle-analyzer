@@ -53,6 +53,11 @@ COPY js/ ./js/
 # モデルとランタイム（WITH_MODELS=false なら空のディレクトリだけが入る）
 COPY --from=assets /assets/ ./
 
+# 3Dリフティングモデル（任意）。Human3.6M 由来の重みのため公開配信しておらず、
+# tools/make-lift-model.sh で生成した場合のみ同梱される。
+# 角括弧は「無ければ何もしない」ためのglob（COPY は対象が無いと失敗するため）。
+COPY models/motionbert_3d_27_int8.onn[x] ./models/
+
 EXPOSE 80 443
 VOLUME ["/etc/nginx/certs"]
 
